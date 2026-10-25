@@ -5,18 +5,20 @@ import { MatchState, NetworkClient, RemotePlayerSnapshot } from './network/Netwo
 import { DEFAULT_GOLDSRC_STATS, PerkManager } from './physics/PerkManager';
 import { GOLDSRC_DT, MoveCmd, PlayerPhysics } from './physics/PlayerPhysics';
 import { PlayerRig } from './renderer/PlayerRig';
-import { TronRenderer } from './renderer/TronRenderer';
+import { CameraMode, TronRenderer } from './renderer/TronRenderer';
 import { HudController } from './ui/HudController';
 import { TrackGenerator } from './world/TrackGenerator';
 
 export interface ExposedGameState {
   fps: number;
+  cameraMode: CameraMode;
   localPlayer: {
     pos: { x: number; y: number; z: number };
     vel: { x: number; y: number; z: number };
     ups: number;
     topUps: number;
     viewYaw: number;
+    viewPitch: number;
     grounded: boolean;
     strafeSync: number;
     alive: boolean;
@@ -50,6 +52,8 @@ declare global {
       stepPhysicsTicks: (ticks: number, cmd: MoveCmd) => void;
       startMatch: (instant?: boolean, seed?: number) => void;
       triggerScrollJump: () => void;
+      cycleCameraMode: () => CameraMode;
+      setCameraMode: (mode: CameraMode) => void;
     };
   }
 }
@@ -80,10 +84,24 @@ function bootstrap(): void {
     },
   });
 
+  const applyCameraMode = (mode: CameraMode) => {
+    renderer.setCameraMode(mode);
+    localRig.setVisible(mode !== 'FIRST_PERSON');
+    hud.setCameraModeLabel(mode);
+  };
+
+  const toggleCameraMode = (): CameraMode => {
+    const next = renderer.cycleCameraMode();
+    localRig.setVisible(next !== 'FIRST_PERSON');
+    hud.setCameraModeLabel(next);
+    return next;
+  };
+
   const input = new InputManager(
     renderer.domElement,
     () => physics.bufferScrollJump(),
-    () => audio.unlock()
+    () => audio.unlock(),
+    () => toggleCameraMode()
   );
 
   const network = new NetworkClient(renderer.scene, {
@@ -91,6 +109,7 @@ function bootstrap(): void {
       track.resetWithSeed(seed);
       physics.reset(spawnX, 0, 0);
       input.viewYaw = 0;
+      input.viewPitch = 0;
       localRig.resetTrail(spawnX, 0, 0, 0);
       renderer.resetCameraSnap(physics.pos, 0);
     },
@@ -112,7 +131,8 @@ function bootstrap(): void {
   const hud = new HudController(
     perkManager,
     () => network.requestStartMatch(false),
-    () => network.requestStartMatch(false)
+    () => network.requestStartMatch(false),
+    () => toggleCameraMode()
   );
 
   // FPS counter smoothing
@@ -124,6 +144,7 @@ function bootstrap(): void {
   const syncWindowState = () => {
     window.__GAME_STATE__ = {
       fps: Math.round(smoothedFps),
+      cameraMode: renderer.cameraMode,
       localPlayer: {
         pos: {
           x: physics.pos.x,
@@ -138,6 +159,7 @@ function bootstrap(): void {
         ups: physics.ups,
         topUps: physics.topUps,
         viewYaw: physics.viewYaw,
+        viewPitch: input.viewPitch,
         grounded: physics.grounded,
         strafeSync: physics.strafeSync,
         alive: physics.alive,
@@ -169,6 +191,7 @@ function bootstrap(): void {
       track.resetWithSeed(track.getSeed());
       physics.reset(0, 0, 0);
       input.viewYaw = 0;
+      input.viewPitch = 0;
       input.testOverride = null;
       localMatchElapsed = 0;
       localRig.resetTrail(0, 0, 0, 0);
@@ -215,6 +238,15 @@ function bootstrap(): void {
     },
     triggerScrollJump: () => {
       physics.bufferScrollJump();
+    },
+    cycleCameraMode: () => {
+      const m = toggleCameraMode();
+      syncWindowState();
+      return m;
+    },
+    setCameraMode: (mode: CameraMode) => {
+      applyCameraMode(mode);
+      syncWindowState();
     },
   };
 
@@ -302,7 +334,10 @@ function bootstrap(): void {
       physics.viewYaw,
       physics.rollAngleDeg,
       physics.ups,
-      rawDt
+      rawDt,
+      input.viewPitch,
+      physics.vel,
+      physics.grounded
     );
 
     network.updateAndSend(rawDt, {

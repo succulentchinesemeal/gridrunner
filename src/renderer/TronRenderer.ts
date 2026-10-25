@@ -5,23 +5,32 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 
 const SPEED_LINE_COUNT = 70;
 
+export type CameraMode = 'CHASE' | 'CLOSE' | 'FIRST_PERSON';
+
+function wrapAngle(angle: number): number {
+  let a = angle;
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
 export class TronRenderer {
   public readonly scene: THREE.Scene;
   public readonly camera: THREE.PerspectiveCamera;
   public readonly renderer: THREE.WebGLRenderer;
   private composer: EffectComposer | null = null;
 
-  /** Sleek Third-Person Action Chase Camera Spec (Low-slung, horizon-focused, zero nausea) */
-  public static readonly CAM_BASE_HEIGHT = 68;
-  public static readonly CAM_BASE_DISTANCE = 132;
+  /** Tuned Action Chase Camera Spec (Crisp 1:1 mouse aim + anti-whip chase boom) */
+  public static readonly CAM_BASE_HEIGHT = 49;
+  public static readonly CAM_BASE_DISTANCE = 86;
   public static readonly CAM_LOOK_AHEAD = 220;
 
-  // Anti-nausea smoothed camera state
-  private smoothCamX = 0;
-  private smoothCamY = 68;
-  private smoothCamZ = 132;
+  public cameraMode: CameraMode = 'CHASE';
+
+  // Anti-whip orbit & vertical pivot smoothing state (zero X/Z position lag)
+  private smoothPivotY = 0;
   private smoothOrbitYaw = 0;
-  private smoothFov = 74;
+  private smoothFov = 72;
   private initializedCam = false;
 
   // 3D Warp Speed Lines in Camera Space for visceral high-UPS feedback
@@ -123,69 +132,130 @@ export class TronRenderer {
     return this.renderer.domElement;
   }
 
+  public cycleCameraMode(): CameraMode {
+    if (this.cameraMode === 'CHASE') {
+      this.cameraMode = 'CLOSE';
+    } else if (this.cameraMode === 'CLOSE') {
+      this.cameraMode = 'FIRST_PERSON';
+    } else {
+      this.cameraMode = 'CHASE';
+    }
+    return this.cameraMode;
+  }
+
+  public setCameraMode(mode: CameraMode): void {
+    this.cameraMode = mode;
+  }
+
   public resetCameraSnap(targetPos: THREE.Vector3, viewYaw: number): void {
     this.smoothOrbitYaw = viewYaw;
-    this.smoothCamX =
-      targetPos.x + Math.sin(viewYaw) * TronRenderer.CAM_BASE_DISTANCE;
-    this.smoothCamY = targetPos.y + TronRenderer.CAM_BASE_HEIGHT;
-    this.smoothCamZ =
-      targetPos.z + Math.cos(viewYaw) * TronRenderer.CAM_BASE_DISTANCE;
+    this.smoothPivotY = targetPos.y;
     this.initializedCam = true;
   }
 
   public updateCamera(
     targetPos: THREE.Vector3,
     viewYaw: number,
-    _rollAngleDeg: number,
+    rollAngleDeg: number,
     ups = 0,
-    dt = 0.016
+    dt = 0.016,
+    viewPitch = 0,
+    vel?: THREE.Vector3,
+    grounded = true
   ): void {
     if (!this.initializedCam) {
       this.resetCameraSnap(targetPos, viewYaw);
     }
 
-    // 1. Dampen orbit yaw so rapid left/right mouse whips don't violently swing camera position sideways
-    let yawDiff = viewYaw - this.smoothOrbitYaw;
-    while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
-    while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
-    this.smoothOrbitYaw += yawDiff * Math.min(1, dt * 8.5);
+    // 1. Frame-rate independent vertical pivot tracking:
+    // Fast catch-up when grounded or descending; smooth shock-absorption during routine bhop arcs
+    const vertRate =
+      this.cameraMode === 'FIRST_PERSON'
+        ? 28
+        : grounded || targetPos.y < this.smoothPivotY
+        ? 20
+        : 10;
+    this.smoothPivotY +=
+      (targetPos.y - this.smoothPivotY) * (1 - Math.exp(-dt * vertRate));
 
-    // Blend 65% smoothed orbit yaw + 35% direct viewYaw for responsive yet rock-steady framing
-    const camOrbitYaw = this.smoothOrbitYaw;
-    const speedFactor = Math.max(0, Math.min(1.5, (ups - 300) / 450));
+    if (this.cameraMode === 'FIRST_PERSON') {
+      // Quake / CS 1.6 Pro First-Person View: zero position lag, 1:1 mouse yaw/pitch, subtle GoldSrc roll
+      this.smoothOrbitYaw = viewYaw;
+      this.camera.position.set(targetPos.x, this.smoothPivotY + 43, targetPos.z);
+      this.camera.rotation.y = viewYaw;
+      this.camera.rotation.x = THREE.MathUtils.clamp(viewPitch - 0.02, -1.25, 1.15);
+      this.camera.rotation.z = THREE.MathUtils.degToRad(rollAngleDeg * 0.55);
+    } else {
+      // Third-Person Action Chase ('CHASE' or 'CLOSE'):
+      // - 100% instant 1:1 mouse aim rotation (camera.rotation.y = viewYaw)
+      // - Anti-whip orbit boom position that glides along the velocity S-curve during air-strafes
+      let desiredOrbitYaw = viewYaw;
+      if (vel && ups > 140) {
+        const velYaw = Math.atan2(-vel.x, -vel.z);
+        const velDelta = wrapAngle(velYaw - viewYaw);
+        if (Math.abs(velDelta) < Math.PI * 0.45) {
+          desiredOrbitYaw = viewYaw + velDelta * 0.45;
+        }
+      }
 
-    // Pull camera slightly lower as speed climbs for an intense ground-rush sensation
-    const dynamicHeight = TronRenderer.CAM_BASE_HEIGHT - speedFactor * 8;
-    const dynamicDist = TronRenderer.CAM_BASE_DISTANCE + speedFactor * 10;
+      const orbitStep = 1 - Math.exp(-dt * 9.5);
+      this.smoothOrbitYaw = wrapAngle(
+        this.smoothOrbitYaw +
+          wrapAngle(desiredOrbitYaw - this.smoothOrbitYaw) * orbitStep
+      );
 
-    const desiredX = targetPos.x + Math.sin(camOrbitYaw) * dynamicDist;
-    const desiredZ = targetPos.z + Math.cos(camOrbitYaw) * dynamicDist;
-    const desiredY = targetPos.y + dynamicHeight;
+      const maxSlack = this.cameraMode === 'CLOSE' ? 0.18 : 0.25;
+      const rawOrbitLag = wrapAngle(viewYaw - this.smoothOrbitYaw);
+      const clampedLag = THREE.MathUtils.clamp(rawOrbitLag, -maxSlack, maxSlack);
+      // Keep smoothOrbitYaw within maxSlack of viewYaw on wide flicks so character stays centered
+      if (Math.abs(rawOrbitLag) > maxSlack) {
+        this.smoothOrbitYaw = wrapAngle(viewYaw - clampedLag);
+      }
 
-    // Horizontal tracking is tight; vertical tracking (smoothCamY) is heavily damped
-    // so bunny-hopping up and down doesn't pogo-bob the camera!
-    this.smoothCamX += (desiredX - this.smoothCamX) * Math.min(1, dt * 18);
-    this.smoothCamZ += (desiredZ - this.smoothCamZ) * Math.min(1, dt * 24);
-    this.smoothCamY += (desiredY - this.smoothCamY) * Math.min(1, dt * 5.2);
+      // Boom angle absorbs 68% of rapid left/right air-strafe mouse wiggles while keeping runner centered
+      const boomYaw = viewYaw - clampedLag * 0.68;
 
-    this.camera.position.set(this.smoothCamX, this.smoothCamY, this.smoothCamZ);
+      const isClose = this.cameraMode === 'CLOSE';
+      const baseDist = isClose ? 56 : TronRenderer.CAM_BASE_DISTANCE;
+      const pivotHeight = isClose ? 40 : 38;
+      const heightAbovePivot = isClose ? 6 : 11;
+      const basePitch = isClose ? -0.055 : -0.085;
 
-    // Look far down the track along the player's heading with a steady horizon (zero Z roll!)
-    const lookYaw = this.smoothOrbitYaw + yawDiff * 0.45;
-    const lookTargetX =
-      targetPos.x - Math.sin(lookYaw) * TronRenderer.CAM_LOOK_AHEAD;
-    const lookTargetZ =
-      targetPos.z - Math.cos(lookYaw) * TronRenderer.CAM_LOOK_AHEAD;
-    const lookTargetY = this.smoothCamY - 34;
+      const speedFactor = Math.max(0, Math.min(1.2, (ups - 320) / 450));
+      const dynamicDist = baseDist + speedFactor * 6;
+      const dynamicHeight = heightAbovePivot - speedFactor * 2.5;
 
-    this.camera.lookAt(lookTargetX, lookTargetY, lookTargetZ);
-    // Keep horizon 100% level to prevent motion sickness
-    this.camera.rotation.z = 0;
+      // Orbit vertically with viewPitch while guarding against floor clipping
+      const orbitPitch = viewPitch * 0.65;
+      const horizDist = dynamicDist * Math.max(0.6, Math.cos(orbitPitch));
+      const pitchHeightOffset = -Math.sin(orbitPitch) * dynamicDist * 0.75;
 
-    // 2. Dynamic Speed FOV (74 deg at base -> up to 98 deg at 750+ UPS)
-    const targetFov = 74 + Math.max(0, Math.min(24, ((ups - 300) / 480) * 24));
+      const camX = targetPos.x + Math.sin(boomYaw) * horizDist;
+      const camZ = targetPos.z + Math.cos(boomYaw) * horizDist;
+      const camY = Math.max(
+        targetPos.y + 12,
+        this.smoothPivotY + pivotHeight + dynamicHeight + pitchHeightOffset
+      );
+
+      this.camera.position.set(camX, camY, camZ);
+
+      // Crisp 1:1 mouse aim rotation (zero input lag)
+      this.camera.rotation.y = viewYaw;
+      this.camera.rotation.x = THREE.MathUtils.clamp(
+        basePitch + viewPitch,
+        -1.05,
+        0.75
+      );
+      this.camera.rotation.z = THREE.MathUtils.degToRad(rollAngleDeg * 0.25);
+    }
+
+    // 2. Dynamic Speed FOV (72 deg base -> up to 90 deg at 750+ UPS, avoiding extreme fisheye)
+    const baseFov = this.cameraMode === 'FIRST_PERSON' ? 78 : 72;
+    const targetFov =
+      baseFov + Math.max(0, Math.min(18, ((ups - 300) / 480) * 18));
     if (Math.abs(targetFov - this.smoothFov) > 0.05) {
-      this.smoothFov += (targetFov - this.smoothFov) * Math.min(1, dt * 8);
+      this.smoothFov +=
+        (targetFov - this.smoothFov) * (1 - Math.exp(-dt * 9));
       this.camera.fov = this.smoothFov;
       this.camera.updateProjectionMatrix();
     }

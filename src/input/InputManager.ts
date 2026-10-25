@@ -3,9 +3,11 @@ import { MoveCmd } from '../physics/PlayerPhysics';
 export class InputManager {
   private keys = new Set<string>();
   public viewYaw = 0;
+  public viewPitch = 0;
   private jumpEdgePending = false;
   private dashPending = false;
   private scrollJumpCallback?: () => void;
+  private toggleCameraCallback?: () => void;
 
   // Mobile Touch state
   private touchJoyX = 0; // -1..1
@@ -13,6 +15,7 @@ export class InputManager {
   private touchJumpHeld = false;
   private lookTouchId: number | null = null;
   private lastLookTouchX = 0;
+  private lastLookTouchY = 0;
   private joyTouchId: number | null = null;
   private joyOriginX = 0;
   private joyOriginY = 0;
@@ -23,9 +26,11 @@ export class InputManager {
   constructor(
     canvas: HTMLCanvasElement,
     onScrollJump?: () => void,
-    onAudioUnlock?: () => void
+    onAudioUnlock?: () => void,
+    onToggleCameraMode?: () => void
   ) {
     this.scrollJumpCallback = onScrollJump;
+    this.toggleCameraCallback = onToggleCameraMode;
 
     window.addEventListener('keydown', (e) => {
       const code = e.code;
@@ -35,6 +40,9 @@ export class InputManager {
         }
         if (code === 'ShiftLeft' || code === 'ShiftRight') {
           this.dashPending = true;
+        }
+        if (code === 'KeyV' || code === 'KeyC') {
+          this.toggleCameraCallback?.();
         }
       }
       this.keys.add(code);
@@ -70,9 +78,15 @@ export class InputManager {
 
     window.addEventListener('mousemove', (e) => {
       if (document.pointerLockElement === canvas) {
-        const sensitivity = 0.0024;
+        const yawSensitivity = 0.0022;
+        const pitchSensitivity = 0.0017;
         // Moving mouse left (movementX < 0) increases viewYaw (turns left/CCW)
-        this.viewYaw -= e.movementX * sensitivity;
+        this.viewYaw -= e.movementX * yawSensitivity;
+        // Moving mouse up (movementY < 0) increases viewPitch (looks up)
+        this.viewPitch = Math.max(
+          -0.65,
+          Math.min(0.55, this.viewPitch - e.movementY * pitchSensitivity)
+        );
       }
     });
 
@@ -150,6 +164,7 @@ export class InputManager {
           const t = e.changedTouches[0];
           this.lookTouchId = t.identifier;
           this.lastLookTouchX = t.clientX;
+          this.lastLookTouchY = t.clientY;
         },
         { passive: true }
       );
@@ -161,8 +176,14 @@ export class InputManager {
             const t = e.changedTouches[i];
             if (t.identifier === this.lookTouchId) {
               const dx = t.clientX - this.lastLookTouchX;
+              const dy = t.clientY - this.lastLookTouchY;
               this.lastLookTouchX = t.clientX;
-              this.viewYaw -= dx * 0.0055;
+              this.lastLookTouchY = t.clientY;
+              this.viewYaw -= dx * 0.0052;
+              this.viewPitch = Math.max(
+                -0.65,
+                Math.min(0.55, this.viewPitch - dy * 0.0038)
+              );
             }
           }
         },

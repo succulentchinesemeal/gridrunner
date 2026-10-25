@@ -217,6 +217,18 @@
         box-shadow: 0 0 10px rgba(0, 255, 102, 0.25);
       }
 
+      .ability-pill.interactive {
+        pointer-events: auto;
+        cursor: pointer;
+        border-color: var(--neon-cyan);
+        color: var(--neon-cyan);
+        background: rgba(0, 243, 255, 0.08);
+      }
+
+      .ability-pill.interactive:hover {
+        background: rgba(0, 243, 255, 0.22);
+      }
+
       /* Session Overlays: LOBBY, COUNTDOWN, PODIUM */
       .modal-panel {
         position: fixed;
@@ -554,9 +566,10 @@
         </div>
       </div>
       <div class="modal-sub">
-        Click canvas for PointerLock Mouse-Look. Hold <b>W</b> on ground to hit
-        320 UPS, jump (<b>Space / Scroll</b>), release <b>W</b>, and air-strafe
-        with <b>A/D</b> + mouse whip!
+        Click canvas for 1:1 PointerLock Mouse-Look (Press <b>V</b> to switch
+        Chase / Close / 1st-Person cam). Hold <b>W</b> on ground to hit 320 UPS,
+        jump (<b>Space / Scroll</b>), release <b>W</b>, and air-strafe with
+        <b>A/D</b> + mouse turn!
       </div>
       <div id="lobby-players-list"></div>
       <div class="modal-sub">SELECT PHASE-2 ROGUELIKE MODIFIER:</div>
@@ -602,6 +615,9 @@
         >
         <span id="hud-dash-status" class="ability-pill ready"
           >CONC DASH [READY]</span
+        >
+        <span id="hud-cam-mode" class="ability-pill interactive"
+          >CAM [V]: CHASE</span
         >
       </div>
     </section>

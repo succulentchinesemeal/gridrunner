@@ -90,6 +90,11 @@ export class PlayerRig {
     scene.add(this.trailMesh);
   }
 
+  public setVisible(visible: boolean): void {
+    this.group.visible = visible;
+    this.trailMesh.visible = visible;
+  }
+
   public detachFromScene(scene: THREE.Scene): void {
     scene.remove(this.group);
     scene.remove(this.trailMesh);
@@ -274,15 +279,22 @@ export class PlayerRig {
     }
     this.wasGrounded = grounded;
 
-    // Smoothly orient character toward velocity vector when moving, or viewYaw at rest
+    // Smoothly orient character toward viewYaw with athletic velocity-carve lead
     let targetHeading = viewYaw;
     if (speed > 25) {
-      targetHeading = Math.atan2(-vel.x, -vel.z);
+      const velHeading = Math.atan2(-vel.x, -vel.z);
+      let velDiff = velHeading - viewYaw;
+      while (velDiff > Math.PI) velDiff -= Math.PI * 2;
+      while (velDiff < -Math.PI) velDiff += Math.PI * 2;
+      // Only blend toward velocity heading when moving generally forward/sideways, clamped so body stays aligned with aim
+      if (Math.abs(velDiff) < Math.PI * 0.65) {
+        targetHeading = viewYaw + THREE.MathUtils.clamp(velDiff * 0.55, -0.48, 0.48);
+      }
     }
     let yawDiff = targetHeading - this.smoothHeadingYaw;
     while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
     while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
-    this.smoothHeadingYaw += yawDiff * Math.min(1, dt * 18);
+    this.smoothHeadingYaw += yawDiff * (1 - Math.exp(-dt * 18));
     this.group.rotation.y = this.smoothHeadingYaw;
 
     // Compute strafe turn delta for athletic body banking

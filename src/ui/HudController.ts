@@ -20,11 +20,13 @@ export class HudController {
   private podiumRowsEl: HTMLElement | null;
   private dangerVignetteEl: HTMLElement | null;
   private actionPromptBannerEl: HTMLElement | null;
+  private camModeEl: HTMLElement | null;
 
   constructor(
     perkManager: PerkManager,
     onStartMatchClick: () => void,
-    onRematchClick: () => void
+    onRematchClick: () => void,
+    onToggleCameraMode?: () => void
   ) {
     this.upsValueEl = document.getElementById('hud-ups-value');
     this.upsUnitEl = document.getElementById('hud-ups-unit');
@@ -43,6 +45,12 @@ export class HudController {
     this.podiumRowsEl = document.getElementById('podium-rows');
     this.dangerVignetteEl = document.getElementById('laser-danger-vignette');
     this.actionPromptBannerEl = document.getElementById('action-prompt-banner');
+    this.camModeEl = document.getElementById('hud-cam-mode');
+
+    this.camModeEl?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onToggleCameraMode?.();
+    });
 
     const startBtn = document.getElementById('start-match-btn');
     startBtn?.addEventListener('click', (e) => {
@@ -116,6 +124,13 @@ export class HudController {
         });
         perkContainer.appendChild(btn);
       }
+    }
+  }
+
+  public setCameraModeLabel(mode: string): void {
+    if (this.camModeEl) {
+      const label = mode === 'FIRST_PERSON' ? '1ST PERSON' : mode;
+      this.camModeEl.textContent = `CAM [V]: ${label}`;
     }
   }
 
