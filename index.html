@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>GRIDRUNNER — GoldSrc 100Hz Cyber-Bhop Arena</title>
+    <style>
+      :root {
+        --bg-void: #05050a;
+        --neon-cyan: #00f3ff;
+        --neon-magenta: #ff007f;
+        --neon-lime: #00ff66;
+        --neon-red: #ff003c;
+        --glass-bg: rgba(7, 10, 24, 0.78);
+      }
+
+      * {
+        box-sizing: border-box;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg-void);
+        font-family: 'Segoe UI', 'Orbitron', 'Consolas', monospace;
+        color: #e8f7ff;
+      }
+
+      #app-canvas-container {
+        position: fixed;
+        inset: 0;
+        z-index: 1;
+      }
+
+      /* Top 6-Player Race Progress Bar & Telemetry Header */
+      #top-hud {
+        position: fixed;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(92vw, 920px);
+        z-index: 10;
+        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .telemetry-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: var(--glass-bg);
+        border: 1px solid rgba(0, 243, 255, 0.35);
+        padding: 6px 16px;
+        border-radius: 6px;
+        font-size: 12px;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        box-shadow: 0 0 18px rgba(0, 243, 255, 0.15);
+      }
+
+      .telemetry-row strong {
+        color: var(--neon-cyan);
+      }
+
+      .wall-warning strong {
+        color: var(--neon-red);
+      }
+
+      #hud-race-bar {
+        position: relative;
+        height: 26px;
+        background: rgba(5, 8, 20, 0.85);
+        border: 1px solid rgba(0, 243, 255, 0.45);
+        border-radius: 13px;
+        overflow: visible;
+      }
+
+      .race-pip {
+        position: absolute;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 2px 8px;
+        border-radius: 10px;
+        background: rgba(5, 8, 18, 0.92);
+        border: 1px solid var(--neon-cyan);
+        font-size: 10px;
+        font-weight: 700;
+        white-space: nowrap;
+        transition: left 0.08s linear;
+      }
+
+      .pip-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+      }
+
+      /* Bottom-Center CS 1.6 / KZ UPS Speedometer & Strafe Sync HUD */
+      #bottom-center-hud {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10;
+        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        min-width: 320px;
+        background: var(--glass-bg);
+        border: 1px solid rgba(0, 243, 255, 0.4);
+        border-radius: 10px;
+        padding: 12px 24px;
+        box-shadow: 0 0 28px rgba(0, 243, 255, 0.18);
+      }
+
+      #hud-ups-value {
+        font-size: 46px;
+        font-weight: 900;
+        line-height: 1;
+        letter-spacing: 2px;
+        transition: color 0.1s ease, text-shadow 0.1s ease;
+      }
+
+      #hud-ups-value.tier-base {
+        color: #ffffff;
+        text-shadow: 0 0 10px rgba(255, 255, 255, 0.45);
+      }
+
+      #hud-ups-value.tier-cyan {
+        color: var(--neon-cyan);
+        text-shadow: 0 0 18px var(--neon-cyan), 0 0 32px rgba(0, 243, 255, 0.65);
+      }
+
+      #hud-ups-value.tier-magenta {
+        color: var(--neon-magenta);
+        text-shadow: 0 0 22px var(--neon-magenta), 0 0 42px var(--neon-magenta);
+        animation: pulse-magenta 0.35s infinite alternate;
+      }
+
+      @keyframes pulse-magenta {
+        from {
+          transform: scale(1);
+        }
+        to {
+          transform: scale(1.06);
+        }
+      }
+
+      #hud-ups-unit {
+        font-size: 11px;
+        letter-spacing: 2px;
+        color: #9bc5ff;
+      }
+
+      .sync-bar-shell {
+        width: 260px;
+        height: 10px;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(0, 243, 255, 0.45);
+        border-radius: 5px;
+        overflow: hidden;
+        margin-top: 4px;
+      }
+
+      #hud-sync-fill {
+        width: 0%;
+        height: 100%;
+        background: linear-gradient(90deg, var(--neon-cyan), var(--neon-lime));
+        box-shadow: 0 0 12px var(--neon-cyan);
+        transition: width 0.06s linear;
+      }
+
+      .sync-meta-row {
+        width: 260px;
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 1px;
+        color: var(--neon-cyan);
+      }
+
+      .ability-badges {
+        display: flex;
+        gap: 12px;
+        margin-top: 4px;
+      }
+
+      .ability-pill {
+        font-size: 10px;
+        padding: 3px 9px;
+        border-radius: 4px;
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        color: rgba(255, 255, 255, 0.45);
+        letter-spacing: 1px;
+      }
+
+      .ability-pill.ready {
+        border-color: var(--neon-lime);
+        color: var(--neon-lime);
+        box-shadow: 0 0 10px rgba(0, 255, 102, 0.25);
+      }
+
+      /* Session Overlays: LOBBY, COUNTDOWN, PODIUM */
+      .modal-panel {
+        position: fixed;
+        top: 84px;
+        right: 20px;
+        width: min(370px, 90vw);
+        background: rgba(6, 9, 22, 0.88);
+        border: 1px solid var(--neon-cyan);
+        border-radius: 10px;
+        padding: 16px;
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        box-shadow: 0 0 30px rgba(0, 243, 255, 0.2);
+      }
+
+      .modal-panel h2 {
+        margin: 0;
+        font-size: 16px;
+        letter-spacing: 2px;
+        color: var(--neon-cyan);
+        text-transform: uppercase;
+      }
+
+      .modal-sub {
+        font-size: 11px;
+        color: #9eb3d2;
+        line-height: 1.4;
+      }
+
+      #lobby-players-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .lobby-player-chip {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 10px;
+        background: rgba(255, 255, 255, 0.04);
+        border-left: 3px solid var(--neon-cyan);
+        border-radius: 4px;
+        font-size: 12px;
+      }
+
+      .chip-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 6px;
+      }
+
+      .perk-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+
+      .perk-card {
+        background: rgba(0, 243, 255, 0.06);
+        border: 1px solid rgba(0, 243, 255, 0.28);
+        border-radius: 6px;
+        padding: 6px 8px;
+        color: #d9f3ff;
+        text-align: left;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        font-size: 10px;
+      }
+
+      .perk-card strong {
+        color: var(--neon-cyan);
+        font-size: 11px;
+      }
+
+      .perk-card.active {
+        border-color: var(--neon-lime);
+        background: rgba(0, 255, 102, 0.14);
+        box-shadow: 0 0 12px rgba(0, 255, 102, 0.25);
+      }
+
+      .cyber-btn {
+        background: linear-gradient(90deg, #00f3ff, #00ff66);
+        color: #030712;
+        font-weight: 900;
+        font-size: 13px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        border: none;
+        border-radius: 6px;
+        padding: 11px 16px;
+        cursor: pointer;
+        box-shadow: 0 0 18px rgba(0, 243, 255, 0.45);
+      }
+
+      .cyber-btn:hover {
+        filter: brightness(1.12);
+      }
+
+      .lobby-room-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        background: rgba(0, 243, 255, 0.07);
+        border: 1px solid rgba(0, 243, 255, 0.3);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 11px;
+      }
+
+      .lobby-room-code {
+        color: var(--neon-cyan);
+        font-weight: 800;
+        letter-spacing: 1px;
+      }
+
+      .lobby-mini-btns {
+        display: flex;
+        gap: 6px;
+      }
+
+      .cyber-mini-btn {
+        background: rgba(0, 243, 255, 0.14);
+        color: var(--neon-cyan);
+        border: 1px solid rgba(0, 243, 255, 0.45);
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+
+      .cyber-mini-btn:hover {
+        background: rgba(0, 243, 255, 0.28);
+      }
+
+      #countdown-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 25;
+        pointer-events: none;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        font-size: 110px;
+        font-weight: 900;
+        color: var(--neon-cyan);
+        text-shadow: 0 0 40px var(--neon-cyan), 0 0 80px var(--neon-magenta);
+      }
+
+      /* Laser Wall Proximity Danger Vignette & Intuitive Action Prompt */
+      #laser-danger-vignette {
+        position: fixed;
+        inset: 0;
+        z-index: 8;
+        pointer-events: none;
+        opacity: 0;
+        background: radial-gradient(
+          circle at center,
+          transparent 52%,
+          rgba(255, 0, 60, 0.55) 100%
+        );
+        transition: opacity 0.15s ease;
+      }
+
+      #action-prompt-banner {
+        position: fixed;
+        top: 94px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 12;
+        pointer-events: none;
+        padding: 8px 20px;
+        border-radius: 20px;
+        background: rgba(4, 12, 26, 0.88);
+        border: 1px solid var(--neon-lime);
+        color: var(--neon-lime);
+        font-size: 13px;
+        font-weight: 800;
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
+        box-shadow: 0 0 20px rgba(0, 255, 102, 0.3);
+        transition: opacity 0.2s ease;
+      }
+
+      #action-prompt-banner.danger {
+        border-color: var(--neon-red);
+        color: #ff4d6d;
+        background: rgba(28, 4, 12, 0.92);
+        box-shadow: 0 0 26px rgba(255, 0, 60, 0.55);
+      }
+
+      #podium-panel {
+        display: none;
+      }
+
+      .podium-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      .podium-table th,
+      .podium-table td {
+        padding: 6px 4px;
+        text-align: left;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .podium-table th {
+        color: var(--neon-cyan);
+        font-size: 10px;
+        letter-spacing: 1px;
+      }
+
+      /* Mobile / Cross-Play Touch Controls */
+      #touch-controls-layer {
+        position: fixed;
+        inset: 0;
+        z-index: 15;
+        pointer-events: none;
+      }
+
+      #touch-joystick-zone {
+        position: absolute;
+        left: 22px;
+        bottom: 26px;
+        width: 128px;
+        height: 128px;
+        border-radius: 50%;
+        border: 2px solid rgba(0, 243, 255, 0.35);
+        background: rgba(5, 10, 24, 0.35);
+        pointer-events: auto;
+        touch-action: none;
+      }
+
+      #touch-joystick-knob {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 46px;
+        height: 46px;
+        transform: translate(-50%, -50%);
+        border-radius: 50%;
+        background: rgba(0, 243, 255, 0.55);
+        border: 2px solid var(--neon-cyan);
+        box-shadow: 0 0 14px var(--neon-cyan);
+      }
+
+      #touch-look-zone {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 50vw;
+        height: 100vh;
+        pointer-events: none;
+        touch-action: none;
+      }
+
+      @media (pointer: coarse) {
+        #touch-look-zone {
+          pointer-events: auto;
+        }
+      }
+
+      .touch-action-buttons {
+        position: absolute;
+        right: 24px;
+        bottom: 30px;
+        display: flex;
+        gap: 14px;
+        pointer-events: auto;
+      }
+
+      .touch-btn {
+        width: 68px;
+        height: 68px;
+        border-radius: 50%;
+        border: 2px solid var(--neon-cyan);
+        background: rgba(6, 12, 28, 0.72);
+        color: var(--neon-cyan);
+        font-weight: 800;
+        font-size: 12px;
+        letter-spacing: 1px;
+        cursor: pointer;
+        touch-action: none;
+        box-shadow: 0 0 16px rgba(0, 243, 255, 0.25);
+      }
+
+      #touch-dash-btn {
+        border-color: var(--neon-magenta);
+        color: var(--neon-magenta);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app-canvas-container"></div>
+    <div id="laser-danger-vignette"></div>
+    <div id="action-prompt-banner">
+      ⚡ HOLD [W] TO SPRINT FORWARD — TAP/HOLD [SPACE] + STRAFE [A/D] TO BHOP!
+    </div>
+
+    <!-- Top 6-Player Race Progress Bar & Telemetry -->
+    <header id="top-hud">
+      <div class="telemetry-row">
+        <span>GRIDRUNNER // <strong>GOLDSRC 100HZ PM_SHARED</strong></span>
+        <span>DISTANCE: <strong id="hud-distance-val">0m (0u)</strong></span>
+        <span class="wall-warning"
+          >DEREZZ WALL: <strong id="hud-wall-val">15m</strong></span
+        >
+      </div>
+      <div id="hud-race-bar">
+        <div id="hud-race-markers"></div>
+      </div>
+    </header>
+
+    <!-- Lobby Panel (Instant Start Match + Perks + Practice while in Lobby) -->
+    <aside id="lobby-panel" class="modal-panel">
+      <h2>CYBER-GRID LOBBY (MAX 6)</h2>
+      <div class="lobby-room-bar">
+        <span>ROOM: <strong id="lobby-room-code" class="lobby-room-code">DEFAULT</strong></span>
+        <div class="lobby-mini-btns">
+          <button id="copy-invite-btn" class="cyber-mini-btn" type="button">COPY INVITE</button>
+          <button id="new-room-btn" class="cyber-mini-btn" type="button">NEW ROOM</button>
+        </div>
+      </div>
+      <div class="modal-sub">
+        Click canvas for PointerLock Mouse-Look. Hold <b>W</b> on ground to hit
+        320 UPS, jump (<b>Space / Scroll</b>), release <b>W</b>, and air-strafe
+        with <b>A/D</b> + mouse whip!
+      </div>
+      <div id="lobby-players-list"></div>
+      <div class="modal-sub">SELECT PHASE-2 ROGUELIKE MODIFIER:</div>
+      <div id="perk-cards-container" class="perk-grid"></div>
+      <button id="start-match-btn" class="cyber-btn">START MATCH</button>
+    </aside>
+
+    <!-- Countdown Overlay -->
+    <div id="countdown-overlay">3</div>
+
+    <!-- Podium Panel -->
+    <aside id="podium-panel" class="modal-panel">
+      <h2>MATCH PODIUM // TELEMETRY</h2>
+      <table class="podium-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>RUNNER</th>
+            <th>DIST</th>
+            <th>TOP UPS</th>
+            <th>SYNC</th>
+          </tr>
+        </thead>
+        <tbody id="podium-rows"></tbody>
+      </table>
+      <button id="rematch-btn" class="cyber-btn">REMATCH</button>
+    </aside>
+
+    <!-- Bottom-Center CS 1.6 / KZ Speedometer & Strafe Sync HUD -->
+    <section id="bottom-center-hud">
+      <div id="hud-ups-value" class="tier-base">0</div>
+      <div id="hud-ups-unit">UPS (TOP 0)</div>
+      <div class="sync-bar-shell">
+        <div id="hud-sync-fill"></div>
+      </div>
+      <div class="sync-meta-row">
+        <span id="hud-sync-text">STRAFE SYNC 0%</span>
+        <span id="hud-bhop-chain">BHOP READY</span>
+      </div>
+      <div class="ability-badges">
+        <span id="hud-djump-status" class="ability-pill ready"
+          >AIR JUMP [1]</span
+        >
+        <span id="hud-dash-status" class="ability-pill ready"
+          >CONC DASH [READY]</span
+        >
+      </div>
+    </section>
+
+    <!-- Cross-Play Mobile Touch Controls -->
+    <div id="touch-controls-layer">
+      <div id="touch-joystick-zone">
+        <div id="touch-joystick-knob"></div>
+      </div>
+      <div id="touch-look-zone"></div>
+      <div class="touch-action-buttons">
+        <button id="touch-jump-btn" class="touch-btn">JUMP</button>
+        <button id="touch-dash-btn" class="touch-btn">DASH</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

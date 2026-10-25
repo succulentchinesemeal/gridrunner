@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": [
+    "src/main.ts",
+    "src/physics/**/*.ts",
+    "src/renderer/**/*.ts",
+    "src/world/**/*.ts",
+    "src/network/**/*.ts",
+    "src/audio/**/*.ts",
+    "src/ui/**/*.ts",
+    "src/input/**/*.ts",
+    "server/**/*.ts"
+  ]
+}
