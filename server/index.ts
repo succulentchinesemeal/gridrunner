@@ -322,8 +322,22 @@ setInterval(() => {
   }
 }, 40);
 
-server.listen(PORT, () => {
-  console.log(
-    `[GRIDRUNNER] HTTP + WebSocket multiplayer server listening on http://localhost:${PORT}`
-  );
-});
+const bindHost =
+  process.env.HOST ||
+  (process.env.RENDER || process.env.RAILWAY_ENVIRONMENT || process.env.FLY_APP_NAME
+    ? '0.0.0.0'
+    : undefined);
+
+if (bindHost) {
+  server.listen(PORT, bindHost, () => {
+    console.log(
+      `[GRIDRUNNER] HTTP + WebSocket multiplayer server listening on http://${bindHost}:${PORT}`
+    );
+  });
+} else {
+  server.listen(PORT, () => {
+    console.log(
+      `[GRIDRUNNER] HTTP + WebSocket multiplayer server listening on http://localhost:${PORT}`
+    );
+  });
+}

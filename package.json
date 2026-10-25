@@ -3,27 +3,30 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "dev:client": "vite --port 5173",
-    "dev:server": "node --import tsx server/index.ts",
+    "dev:server": "tsx server/index.ts",
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "build": "tsc --noEmit && vite build",
-    "start": "node --import tsx server/index.ts",
+    "start": "tsx server/index.ts",
     "preview": "vite preview --port 5173",
     "test": "playwright test"
   },
   "dependencies": {
+    "@types/node": "^22.10.0",
+    "@types/three": "^0.170.0",
+    "@types/ws": "^8.5.13",
     "three": "^0.170.0",
     "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
-    "@types/node": "^22.10.0",
-    "@types/three": "^0.170.0",
-    "@types/ws": "^8.5.13",
-    "concurrently": "^9.1.0",
-    "typescript": "^5.7.2",
-    "vite": "^6.0.3"
+    "concurrently": "^9.1.0"
   }
 }
