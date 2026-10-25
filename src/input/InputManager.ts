@@ -423,9 +423,16 @@ export class InputManager {
     const targetDx = Math.max(-100, Math.min(100, (frameDx / safeDt) * 0.065));
     const targetDy = Math.max(-100, Math.min(100, (frameDy / safeDt) * 0.065));
 
-    const blend = Math.min(1, safeDt * 22);
-    this.smoothedMouseDx += (targetDx - this.smoothedMouseDx) * blend;
-    this.smoothedMouseDy += (targetDy - this.smoothedMouseDy) * blend;
+    const blendX =
+      Math.abs(targetDx) >= Math.abs(this.smoothedMouseDx)
+        ? Math.min(1, safeDt * 28)
+        : Math.min(1, safeDt * 4.5);
+    const blendY =
+      Math.abs(targetDy) >= Math.abs(this.smoothedMouseDy)
+        ? Math.min(1, safeDt * 28)
+        : Math.min(1, safeDt * 4.5);
+    this.smoothedMouseDx += (targetDx - this.smoothedMouseDx) * blendX;
+    this.smoothedMouseDy += (targetDy - this.smoothedMouseDy) * blendY;
 
     if (Math.abs(this.smoothedMouseDx) < 0.2) this.smoothedMouseDx = 0;
     if (Math.abs(this.smoothedMouseDy) < 0.2) this.smoothedMouseDy = 0;

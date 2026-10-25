@@ -192,20 +192,63 @@ export class NetworkClient {
         const rig = new PlayerRig(p.color || 0xff007f);
         rig.attachToScene(this.scene);
         rig.resetTrail(p.x, p.y, p.z, p.yaw);
+        if (!p.inputs) {
+          p.inputs = {
+            w: p.ups > 40,
+            a: false,
+            s: false,
+            d: false,
+            jump: p.state === 'airborne',
+            dash: p.state === 'dashing',
+            mouseDx: 0,
+            mouseDy: 0,
+          };
+        }
         entity = {
           snapshot: p,
           renderPos: new THREE.Vector3(p.x, p.y, p.z),
           renderVel: new THREE.Vector3(p.vx, p.vy, p.vz),
           renderYaw: p.yaw,
           renderPitch: p.pitch ?? 0,
-          smoothedMouseDx: p.inputs?.mouseDx ?? 0,
-          smoothedMouseDy: p.inputs?.mouseDy ?? 0,
-          prevJump: Boolean(p.inputs?.jump),
-          prevDash: Boolean(p.inputs?.dash),
+          smoothedMouseDx: p.inputs.mouseDx,
+          smoothedMouseDy: p.inputs.mouseDy,
+          prevJump: Boolean(p.inputs.jump),
+          prevDash: Boolean(p.inputs.dash),
           rig,
         };
         this.remotePlayers.set(p.id, entity);
       } else {
+        const yawDelta = p.yaw - entity.snapshot.yaw;
+        const derivedDx =
+          Math.abs(yawDelta) > 0.0001
+            ? Math.max(
+                -100,
+                Math.min(100, (-yawDelta / 0.0022 / 0.04) * 0.065)
+              )
+            : entity.smoothedMouseDx * 0.92;
+        if (!p.inputs) {
+          const fx = -Math.sin(p.yaw);
+          const fz = -Math.cos(p.yaw);
+          const rx = Math.cos(p.yaw);
+          const rz = -Math.sin(p.yaw);
+          const fVel = p.vx * fx + p.vz * fz;
+          const sVel = p.vx * rx + p.vz * rz;
+          p.inputs = {
+            w: fVel > 40 || p.ups > 120,
+            s: fVel < -40,
+            a: sVel < -20 || yawDelta > 0.0005 || entity.smoothedMouseDx < -2,
+            d: sVel > 20 || yawDelta < -0.0005 || entity.smoothedMouseDx > 2,
+            jump: p.state === 'airborne' || p.vy > 10,
+            dash: p.state === 'dashing',
+            mouseDx: Math.round(derivedDx * 10) / 10,
+            mouseDy: 0,
+          };
+        } else if (
+          Math.abs(p.inputs.mouseDx) < 0.5 &&
+          Math.abs(derivedDx) > 1.0
+        ) {
+          p.inputs.mouseDx = Math.round(derivedDx * 10) / 10;
+        }
         entity.snapshot = p;
       }
     }

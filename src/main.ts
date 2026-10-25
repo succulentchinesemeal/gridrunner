@@ -1,7 +1,13 @@
 import * as THREE from 'three';
 import { SynthAudio } from './audio/SynthAudio';
 import { InputManager } from './input/InputManager';
-import { MatchState, NetworkClient, RemotePlayerSnapshot } from './network/NetworkClient';
+import {
+  MatchState,
+  NetworkClient,
+  PlayerInputTelemetry,
+  RemotePlayerEntity,
+  RemotePlayerSnapshot,
+} from './network/NetworkClient';
 import { DEFAULT_GOLDSRC_STATS, PerkManager } from './physics/PerkManager';
 import { GOLDSRC_DT, MoveCmd, PlayerPhysics } from './physics/PlayerPhysics';
 import { PlayerRig } from './renderer/PlayerRig';
@@ -24,6 +30,14 @@ export interface ExposedGameState {
     alive: boolean;
     distance: number;
     bhopChain: number;
+    inputs: PlayerInputTelemetry;
+  };
+  spectator: {
+    active: boolean;
+    targetPlayerId: string | null;
+    targetPlayerName: string | null;
+    aliveSpectatableCount: number;
+    targetInputs: PlayerInputTelemetry | null;
   };
   remotePlayersCount: number;
   remotePlayers: RemotePlayerSnapshot[];
@@ -54,6 +68,8 @@ declare global {
       triggerScrollJump: () => void;
       cycleCameraMode: () => CameraMode;
       setCameraMode: (mode: CameraMode) => void;
+      killLocalPlayer: () => void;
+      cycleSpectatorTarget: (dir?: 1 | -1) => string | null;
     };
   }
 }
@@ -69,6 +85,18 @@ function bootstrap(): void {
 
   const localRig = new PlayerRig(0x00f3ff);
   localRig.attachToScene(renderer.scene);
+
+  let spectatedPlayerId: string | null = null;
+  let lastLocalTelemetry: PlayerInputTelemetry = {
+    w: false,
+    a: false,
+    s: false,
+    d: false,
+    jump: false,
+    dash: false,
+    mouseDx: 0,
+    mouseDy: 0,
+  };
 
   const physics = new PlayerPhysics(perkManager, {
     onJump: (ups, _isBhop, isDoubleJump) => {
@@ -86,36 +114,106 @@ function bootstrap(): void {
 
   const applyCameraMode = (mode: CameraMode) => {
     renderer.setCameraMode(mode);
-    localRig.setVisible(mode !== 'FIRST_PERSON');
+    localRig.setVisible(physics.alive && mode !== 'FIRST_PERSON');
     hud.setCameraModeLabel(mode);
   };
 
   const toggleCameraMode = (): CameraMode => {
+    if (!physics.alive && spectatedPlayerId !== null) {
+      // Spectator mode enforces Chase Cam
+      applyCameraMode('CHASE');
+      return 'CHASE';
+    }
     const next = renderer.cycleCameraMode();
-    localRig.setVisible(next !== 'FIRST_PERSON');
+    localRig.setVisible(physics.alive && next !== 'FIRST_PERSON');
     hud.setCameraModeLabel(next);
     return next;
+  };
+
+  const resolveSpectatorState = (): {
+    active: boolean;
+    entity: RemotePlayerEntity | null;
+    index: number;
+    aliveCount: number;
+  } => {
+    const aliveRemotes = network.getAliveRemoteEntities();
+    if (physics.alive || aliveRemotes.length === 0) {
+      spectatedPlayerId = null;
+      return {
+        active: false,
+        entity: null,
+        index: -1,
+        aliveCount: aliveRemotes.length,
+      };
+    }
+
+    let idx = aliveRemotes.findIndex(
+      (e) => e.snapshot.id === spectatedPlayerId
+    );
+    if (idx === -1) {
+      idx = 0;
+      const chosen = aliveRemotes[0];
+      spectatedPlayerId = chosen.snapshot.id;
+      applyCameraMode('CHASE');
+      renderer.resetCameraSnap(chosen.renderPos, chosen.renderYaw);
+    }
+
+    return {
+      active: true,
+      entity: aliveRemotes[idx],
+      index: idx,
+      aliveCount: aliveRemotes.length,
+    };
+  };
+
+  const cycleSpectatorTarget = (dir: 1 | -1 = 1): string | null => {
+    const aliveRemotes = network.getAliveRemoteEntities();
+    if (physics.alive || aliveRemotes.length === 0) {
+      spectatedPlayerId = null;
+      return null;
+    }
+
+    const currentIdx = aliveRemotes.findIndex(
+      (e) => e.snapshot.id === spectatedPlayerId
+    );
+    const nextIdx =
+      currentIdx === -1
+        ? 0
+        : (currentIdx + dir + aliveRemotes.length) % aliveRemotes.length;
+    const chosen = aliveRemotes[nextIdx];
+    spectatedPlayerId = chosen.snapshot.id;
+    applyCameraMode('CHASE');
+    renderer.resetCameraSnap(chosen.renderPos, chosen.renderYaw);
+    syncWindowState();
+    return spectatedPlayerId;
   };
 
   const input = new InputManager(
     renderer.domElement,
     () => physics.bufferScrollJump(),
     () => audio.unlock(),
-    () => toggleCameraMode()
+    () => toggleCameraMode(),
+    (dir) => cycleSpectatorTarget(dir),
+    () => !physics.alive && network.getAliveRemoteEntities().length > 0
   );
 
   const network = new NetworkClient(renderer.scene, {
     onMatchSeedChanged: (seed, spawnX) => {
+      spectatedPlayerId = null;
       track.resetWithSeed(seed);
       physics.reset(spawnX, 0, 0);
       input.viewYaw = 0;
       input.viewPitch = 0;
+      input.resetTelemetry(0, 0);
+      localRig.setVisible(renderer.cameraMode !== 'FIRST_PERSON');
       localRig.resetTrail(spawnX, 0, 0, 0);
       renderer.resetCameraSnap(physics.pos, 0);
     },
     onMatchStateChanged: (_prev, nextState) => {
       if (nextState === 'ACTIVE') {
+        spectatedPlayerId = null;
         physics.alive = true;
+        localRig.setVisible(renderer.cameraMode !== 'FIRST_PERSON');
         // Intuitive opening launch boost at "GO!" so the acrobat starts sprinting forward immediately
         if (physics.ups < 180 && physics.distance < 50) {
           physics.vel.z = -260;
@@ -132,16 +230,48 @@ function bootstrap(): void {
     perkManager,
     () => network.requestStartMatch(false),
     () => network.requestStartMatch(false),
-    () => toggleCameraMode()
+    () => toggleCameraMode(),
+    (dir) => cycleSpectatorTarget(dir)
   );
 
   // FPS counter smoothing
   let smoothedFps = 60;
   let lastFrameTime = performance.now();
   let localMatchElapsed = 0;
+  let wasAliveLastFrame = true;
   const interpPos = new THREE.Vector3();
 
+  const buildLocalNetPayload = () => {
+    const isDashing =
+      physics.dashCooldownTimer > physics.stats.dashCooldown - 0.3;
+    return {
+      x: physics.pos.x,
+      y: physics.pos.y,
+      z: physics.pos.z,
+      vx: physics.vel.x,
+      vy: physics.vel.y,
+      vz: physics.vel.z,
+      yaw: physics.viewYaw,
+      pitch: input.viewPitch,
+      state: (!physics.alive
+        ? 'dead'
+        : isDashing
+        ? 'dashing'
+        : physics.grounded
+        ? 'grounded'
+        : 'airborne') as 'grounded' | 'airborne' | 'dashing' | 'dead',
+      ups: physics.ups,
+      topUps: physics.topUps,
+      strafeSync: physics.strafeSync,
+      alive: physics.alive,
+      distance: physics.distance,
+      bhopChain: physics.bhopChain,
+      inputs: lastLocalTelemetry,
+    };
+  };
+
   const syncWindowState = () => {
+    const spec = resolveSpectatorState();
     window.__GAME_STATE__ = {
       fps: Math.round(smoothedFps),
       cameraMode: renderer.cameraMode,
@@ -165,6 +295,20 @@ function bootstrap(): void {
         alive: physics.alive,
         distance: physics.distance,
         bhopChain: physics.bhopChain,
+        inputs: lastLocalTelemetry,
+      },
+      spectator: {
+        active: spec.active,
+        targetPlayerId: spec.entity ? spec.entity.snapshot.id : null,
+        targetPlayerName: spec.entity ? spec.entity.snapshot.name : null,
+        aliveSpectatableCount: spec.aliveCount,
+        targetInputs: spec.entity?.snapshot.inputs
+          ? {
+              ...spec.entity.snapshot.inputs,
+              mouseDx: spec.entity.smoothedMouseDx,
+              mouseDy: spec.entity.smoothedMouseDy,
+            }
+          : null,
       },
       remotePlayersCount: network.getRemotePlayersCount(),
       remotePlayers: network.getRemoteSnapshots(),
@@ -187,13 +331,17 @@ function bootstrap(): void {
 
   window.__GAME_CONTROLS__ = {
     resetPlayer: (flatTestMode = false) => {
+      spectatedPlayerId = null;
       track.flatTestMode = flatTestMode;
       track.resetWithSeed(track.getSeed());
       physics.reset(0, 0, 0);
       input.viewYaw = 0;
       input.viewPitch = 0;
+      input.resetTelemetry(0, 0);
       input.testOverride = null;
       localMatchElapsed = 0;
+      wasAliveLastFrame = true;
+      localRig.setVisible(renderer.cameraMode !== 'FIRST_PERSON');
       localRig.resetTrail(0, 0, 0, 0);
       renderer.resetCameraSnap(physics.pos, 0);
       syncWindowState();
@@ -211,28 +359,18 @@ function bootstrap(): void {
         track.updateAroundPlayerZ(physics.pos.z, localMatchElapsed, GOLDSRC_DT);
       }
       input.viewYaw = cmd.viewYaw;
-      network.updateAndSend(0.05, {
-        x: physics.pos.x,
-        y: physics.pos.y,
-        z: physics.pos.z,
-        vx: physics.vel.x,
-        vy: physics.vel.y,
-        vz: physics.vel.z,
-        yaw: physics.viewYaw,
-        state: !physics.alive
-          ? 'dead'
-          : physics.grounded
-          ? 'grounded'
-          : 'airborne',
-        ups: physics.ups,
-        topUps: physics.topUps,
-        strafeSync: physics.strafeSync,
-        alive: physics.alive,
-        distance: physics.distance,
-      });
+      const isDashing =
+        physics.dashCooldownTimer > physics.stats.dashCooldown - 0.3;
+      lastLocalTelemetry = input.getInputTelemetry(
+        cmd,
+        Math.max(GOLDSRC_DT, ticks * GOLDSRC_DT),
+        isDashing
+      );
+      network.updateAndSend(0.05, buildLocalNetPayload(), true);
       syncWindowState();
     },
     startMatch: (instant = false, seed?: number) => {
+      spectatedPlayerId = null;
       network.requestStartMatch(instant, seed);
       syncWindowState();
     },
@@ -247,6 +385,27 @@ function bootstrap(): void {
     setCameraMode: (mode: CameraMode) => {
       applyCameraMode(mode);
       syncWindowState();
+    },
+    killLocalPlayer: () => {
+      physics.alive = false;
+      localRig.setVisible(false);
+      audio.playDerezz();
+      lastLocalTelemetry = {
+        w: false,
+        a: false,
+        s: false,
+        d: false,
+        jump: false,
+        dash: false,
+        mouseDx: 0,
+        mouseDy: 0,
+      };
+      network.updateAndSend(0.05, buildLocalNetPayload(), true);
+      resolveSpectatorState();
+      syncWindowState();
+    },
+    cycleSpectatorTarget: (dir: 1 | -1 = 1) => {
+      return cycleSpectatorTarget(dir);
     },
   };
 
@@ -293,13 +452,40 @@ function bootstrap(): void {
       lastCmd = input.sampleMoveCmd(physics.stats.sv_maxspeed);
       alpha = physics.update(rawDt, lastCmd, track);
       localMatchElapsed += rawDt;
-    } else if (!physics.alive && network.matchState === 'LOBBY') {
-      // Auto-respawn in Lobby practice mode if player falls in a chasm
+      const isDashing =
+        physics.dashCooldownTimer > physics.stats.dashCooldown - 0.3;
+      lastLocalTelemetry = input.getInputTelemetry(lastCmd, rawDt, isDashing);
+    } else if (
+      !physics.alive &&
+      network.matchState === 'LOBBY' &&
+      network.getAliveRemoteEntities().length === 0
+    ) {
+      // Auto-respawn in solo Lobby practice mode if player falls in a chasm
       physics.reset(0, 0, 0);
       track.resetWithSeed(track.getSeed());
+      input.resetTelemetry(0, 0);
+      localRig.setVisible(renderer.cameraMode !== 'FIRST_PERSON');
       localRig.resetTrail(0, 0, 0, 0);
       renderer.resetCameraSnap(physics.pos, 0);
+    } else if (!physics.alive) {
+      lastLocalTelemetry = {
+        w: false,
+        a: false,
+        s: false,
+        d: false,
+        jump: false,
+        dash: false,
+        mouseDx: 0,
+        mouseDy: 0,
+      };
     }
+
+    const justDied = wasAliveLastFrame && !physics.alive;
+    wasAliveLastFrame = physics.alive;
+
+    network.updateAndSend(rawDt, buildLocalNetPayload(), justDied);
+
+    const spec = resolveSpectatorState();
 
     const wallTime =
       network.matchState === 'ACTIVE'
@@ -307,58 +493,73 @@ function bootstrap(): void {
         : 0;
     const advanceWall = network.matchState === 'ACTIVE';
     track.wallEnabled = advanceWall;
-    track.updateAroundPlayerZ(
-      physics.pos.z,
-      wallTime,
-      advanceWall ? rawDt : 0
-    );
 
-    physics.getInterpolatedPosition(alpha, interpPos);
-    localRig.updateTransform(
-      interpPos,
-      physics.vel,
-      physics.viewYaw,
-      rawDt,
-      {
-        grounded: physics.grounded,
-        ups: physics.ups,
-        vel: physics.vel,
-        viewYaw: physics.viewYaw,
-        smove: lastCmd.smove,
-        fmove: lastCmd.fmove,
-        isDashing: physics.dashCooldownTimer > physics.stats.dashCooldown - 0.3,
+    if (spec.active && spec.entity) {
+      // Spectator Chase Cam following the selected alive remote player
+      localRig.setVisible(false);
+      if (renderer.cameraMode !== 'CHASE') {
+        applyCameraMode('CHASE');
       }
-    );
-    renderer.updateCamera(
-      interpPos,
-      physics.viewYaw,
-      physics.rollAngleDeg,
-      physics.ups,
-      rawDt,
-      input.viewPitch,
-      physics.vel,
-      physics.grounded
-    );
+      const targetEntity = spec.entity;
+      track.updateAroundPlayerZ(
+        targetEntity.renderPos.z,
+        wallTime,
+        advanceWall ? rawDt : 0
+      );
 
-    network.updateAndSend(rawDt, {
-      x: physics.pos.x,
-      y: physics.pos.y,
-      z: physics.pos.z,
-      vx: physics.vel.x,
-      vy: physics.vel.y,
-      vz: physics.vel.z,
-      yaw: physics.viewYaw,
-      state: !physics.alive
-        ? 'dead'
-        : physics.grounded
-        ? 'grounded'
-        : 'airborne',
-      ups: physics.ups,
-      topUps: physics.topUps,
-      strafeSync: physics.strafeSync,
-      alive: physics.alive,
-      distance: physics.distance,
-    });
+      const specRoll = targetEntity.snapshot.inputs?.a
+        ? 2.5
+        : targetEntity.snapshot.inputs?.d
+        ? -2.5
+        : 0;
+      renderer.updateCamera(
+        targetEntity.renderPos,
+        targetEntity.renderYaw,
+        specRoll,
+        targetEntity.snapshot.ups,
+        rawDt,
+        targetEntity.renderPitch,
+        targetEntity.renderVel,
+        targetEntity.snapshot.state === 'grounded'
+      );
+    } else {
+      localRig.setVisible(
+        physics.alive && renderer.cameraMode !== 'FIRST_PERSON'
+      );
+      track.updateAroundPlayerZ(
+        physics.pos.z,
+        wallTime,
+        advanceWall ? rawDt : 0
+      );
+
+      physics.getInterpolatedPosition(alpha, interpPos);
+      localRig.updateTransform(
+        interpPos,
+        physics.vel,
+        physics.viewYaw,
+        rawDt,
+        {
+          grounded: physics.grounded,
+          ups: physics.ups,
+          vel: physics.vel,
+          viewYaw: physics.viewYaw,
+          smove: lastCmd.smove,
+          fmove: lastCmd.fmove,
+          isDashing:
+            physics.dashCooldownTimer > physics.stats.dashCooldown - 0.3,
+        }
+      );
+      renderer.updateCamera(
+        interpPos,
+        physics.viewYaw,
+        physics.rollAngleDeg,
+        physics.ups,
+        rawDt,
+        input.viewPitch,
+        physics.vel,
+        physics.grounded
+      );
+    }
 
     hud.update(
       physics,
@@ -366,7 +567,16 @@ function bootstrap(): void {
       network.countdownRemaining,
       track.wallZ,
       network.localPlayerId,
-      network.allRoomPlayers
+      network.allRoomPlayers,
+      lastLocalTelemetry,
+      {
+        active: spec.active,
+        target: spec.entity ? spec.entity.snapshot : null,
+        targetIndex: spec.index,
+        aliveCount: spec.aliveCount,
+        smoothedMouseDx: spec.entity ? spec.entity.smoothedMouseDx : 0,
+        smoothedMouseDy: spec.entity ? spec.entity.smoothedMouseDy : 0,
+      }
     );
 
     renderer.render();

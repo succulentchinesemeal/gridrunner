@@ -532,6 +532,257 @@
         border-color: var(--neon-magenta);
         color: var(--neon-magenta);
       }
+
+      /* Spectator Chase Cam Banner & Cycle Controls */
+      #spectator-panel {
+        position: fixed;
+        top: 132px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 18;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        background: rgba(6, 9, 24, 0.92);
+        border: 1px solid var(--neon-cyan);
+        border-radius: 10px;
+        padding: 10px 18px;
+        box-shadow: 0 0 28px rgba(0, 243, 255, 0.28);
+        pointer-events: auto;
+      }
+
+      .spec-header-row {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .spec-cycle-btn {
+        background: rgba(0, 243, 255, 0.14);
+        color: var(--neon-cyan);
+        border: 1px solid rgba(0, 243, 255, 0.55);
+        border-radius: 6px;
+        padding: 5px 11px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 1px;
+        cursor: pointer;
+        text-transform: uppercase;
+        transition: background 0.12s ease, transform 0.1s ease;
+      }
+
+      .spec-cycle-btn:hover {
+        background: rgba(0, 243, 255, 0.3);
+        transform: scale(1.04);
+      }
+
+      .spec-target-box {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-width: 170px;
+      }
+
+      .spec-mode-badge {
+        font-size: 9px;
+        letter-spacing: 1.6px;
+        color: var(--neon-magenta);
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      #spectator-target-name {
+        font-size: 16px;
+        font-weight: 900;
+        letter-spacing: 2px;
+        color: var(--neon-cyan);
+        text-shadow: 0 0 12px rgba(0, 243, 255, 0.65);
+      }
+
+      #spectator-sub-hint {
+        font-size: 10px;
+        letter-spacing: 1px;
+        color: #9bc5ff;
+      }
+
+      /* Live Button Movements (WASD / Jump / Dash) & Cursor Movement Telemetry HUD */
+      #hud-input-telemetry {
+        position: fixed;
+        bottom: 24px;
+        left: calc(50% - 176px);
+        transform: translateX(-100%);
+        z-index: 12;
+        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        background: var(--glass-bg);
+        border: 1px solid rgba(0, 243, 255, 0.4);
+        border-radius: 10px;
+        padding: 10px 14px;
+        box-shadow: 0 0 24px rgba(0, 243, 255, 0.16);
+      }
+
+      @media (max-width: 980px) {
+        #hud-input-telemetry {
+          left: 50%;
+          bottom: 196px;
+          transform: translateX(-50%);
+        }
+      }
+
+      .input-telemetry-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 1.2px;
+        color: var(--neon-cyan);
+        border-bottom: 1px solid rgba(0, 243, 255, 0.2);
+        padding-bottom: 4px;
+      }
+
+      .input-telemetry-body {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .key-matrix {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .key-row {
+        display: flex;
+        justify-content: center;
+        gap: 5px;
+      }
+
+      .hud-keycap {
+        min-width: 32px;
+        height: 30px;
+        padding: 0 6px;
+        border-radius: 5px;
+        border: 1px solid rgba(0, 243, 255, 0.32);
+        background: rgba(5, 10, 24, 0.78);
+        color: rgba(215, 243, 255, 0.45);
+        font-size: 11px;
+        font-weight: 900;
+        letter-spacing: 1px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.05s ease;
+      }
+
+      .hud-keycap.wide {
+        min-width: 50px;
+        font-size: 9px;
+      }
+
+      .hud-keycap.active {
+        background: rgba(0, 243, 255, 0.28);
+        border-color: var(--neon-cyan);
+        color: #ffffff;
+        box-shadow: 0 0 14px rgba(0, 243, 255, 0.65),
+          inset 0 0 8px rgba(0, 243, 255, 0.35);
+        transform: translateY(-1px) scale(1.04);
+      }
+
+      .hud-keycap.dash-key.active {
+        background: rgba(255, 0, 127, 0.32);
+        border-color: var(--neon-magenta);
+        box-shadow: 0 0 14px rgba(255, 0, 127, 0.7);
+      }
+
+      .hud-keycap.jump-key.active {
+        background: rgba(0, 255, 102, 0.28);
+        border-color: var(--neon-lime);
+        box-shadow: 0 0 14px rgba(0, 255, 102, 0.7);
+      }
+
+      /* 2D Cursor Movement Telemetry Pad */
+      .cursor-telemetry-box {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+      }
+
+      #hud-cursor-pad {
+        position: relative;
+        width: 72px;
+        height: 72px;
+        border-radius: 8px;
+        border: 1px solid rgba(0, 243, 255, 0.42);
+        background: radial-gradient(
+          circle at center,
+          rgba(0, 243, 255, 0.12) 0%,
+          rgba(4, 8, 20, 0.9) 75%
+        );
+        overflow: hidden;
+      }
+
+      .cursor-axis-h {
+        position: absolute;
+        top: 50%;
+        left: 0;
+        right: 0;
+        height: 1px;
+        background: rgba(0, 243, 255, 0.22);
+      }
+
+      .cursor-axis-v {
+        position: absolute;
+        left: 50%;
+        top: 0;
+        bottom: 0;
+        width: 1px;
+        background: rgba(0, 243, 255, 0.22);
+      }
+
+      #hud-cursor-dot {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: var(--neon-cyan);
+        border: 2px solid #ffffff;
+        box-shadow: 0 0 12px var(--neon-cyan), 0 0 20px var(--neon-magenta);
+        transform: translate(-50%, -50%);
+        transition: transform 0.04s linear;
+      }
+
+      .cursor-turn-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 78px;
+        font-size: 9px;
+        font-weight: 800;
+        color: #8ab8e6;
+        letter-spacing: 0.5px;
+      }
+
+      .cursor-turn-arrow {
+        opacity: 0.25;
+        color: var(--neon-cyan);
+        font-size: 11px;
+        transition: opacity 0.06s ease, text-shadow 0.06s ease;
+      }
+
+      .cursor-turn-arrow.active {
+        opacity: 1;
+        color: var(--neon-lime);
+        text-shadow: 0 0 10px var(--neon-lime);
+      }
     </style>
   </head>
   <body>
@@ -554,6 +805,59 @@
         <div id="hud-race-markers"></div>
       </div>
     </header>
+
+    <!-- Spectator Chase Cam Banner & Player Cycling Controls -->
+    <section id="spectator-panel">
+      <div class="spec-header-row">
+        <button id="spec-prev-btn" class="spec-cycle-btn" type="button">
+          ◀ PREV [A / ←]
+        </button>
+        <div class="spec-target-box">
+          <span class="spec-mode-badge">SPECTATING // CHASE CAM</span>
+          <span id="spectator-target-name">RUNNER-2</span>
+        </div>
+        <button id="spec-next-btn" class="spec-cycle-btn" type="button">
+          NEXT [D / →] ▶
+        </button>
+      </div>
+      <div id="spectator-sub-hint">
+        CLICK OR PRESS [A / D / ← / → / TAB] TO CYCLE REMAINING PLAYERS
+      </div>
+    </section>
+
+    <!-- Live Button Movements & Cursor Movements HUD -->
+    <aside id="hud-input-telemetry">
+      <div class="input-telemetry-header">
+        <span id="hud-input-owner">INPUT TELEMETRY // YOU</span>
+        <span id="hud-cursor-delta">AIM Δ 0, 0</span>
+      </div>
+      <div class="input-telemetry-body">
+        <div class="key-matrix">
+          <div class="key-row">
+            <div id="hud-key-dash" class="hud-keycap wide dash-key">DASH</div>
+            <div id="hud-key-w" class="hud-keycap">W</div>
+            <div id="hud-key-jump" class="hud-keycap wide jump-key">JUMP</div>
+          </div>
+          <div class="key-row">
+            <div id="hud-key-a" class="hud-keycap">A</div>
+            <div id="hud-key-s" class="hud-keycap">S</div>
+            <div id="hud-key-d" class="hud-keycap">D</div>
+          </div>
+        </div>
+        <div class="cursor-telemetry-box">
+          <div id="hud-cursor-pad">
+            <div class="cursor-axis-h"></div>
+            <div class="cursor-axis-v"></div>
+            <div id="hud-cursor-dot"></div>
+          </div>
+          <div class="cursor-turn-row">
+            <span id="hud-cursor-dir-left" class="cursor-turn-arrow">◄</span>
+            <span>CURSOR</span>
+            <span id="hud-cursor-dir-right" class="cursor-turn-arrow">►</span>
+          </div>
+        </div>
+      </div>
+    </aside>
 
     <!-- Lobby Panel (Instant Start Match + Perks + Practice while in Lobby) -->
     <aside id="lobby-panel" class="modal-panel">

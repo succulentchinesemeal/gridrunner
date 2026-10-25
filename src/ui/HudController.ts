@@ -1,6 +1,19 @@
-import { MatchState, RemotePlayerSnapshot } from '../network/NetworkClient';
+import {
+  MatchState,
+  PlayerInputTelemetry,
+  RemotePlayerSnapshot,
+} from '../network/NetworkClient';
 import { BUILTIN_PERKS, PerkManager } from '../physics/PerkManager';
 import { PlayerPhysics } from '../physics/PlayerPhysics';
+
+export interface SpectatorHudState {
+  active: boolean;
+  target: RemotePlayerSnapshot | null;
+  targetIndex: number;
+  aliveCount: number;
+  smoothedMouseDx: number;
+  smoothedMouseDy: number;
+}
 
 export class HudController {
   private upsValueEl: HTMLElement | null;
@@ -22,11 +35,28 @@ export class HudController {
   private actionPromptBannerEl: HTMLElement | null;
   private camModeEl: HTMLElement | null;
 
+  // Spectator & Input/Cursor Telemetry HUD Elements
+  private spectatorPanelEl: HTMLElement | null;
+  private spectatorTargetNameEl: HTMLElement | null;
+  private spectatorSubHintEl: HTMLElement | null;
+  private inputOwnerEl: HTMLElement | null;
+  private cursorDeltaEl: HTMLElement | null;
+  private cursorDotEl: HTMLElement | null;
+  private cursorDirLeftEl: HTMLElement | null;
+  private cursorDirRightEl: HTMLElement | null;
+  private keyWEl: HTMLElement | null;
+  private keyAEl: HTMLElement | null;
+  private keySEl: HTMLElement | null;
+  private keyDEl: HTMLElement | null;
+  private keyJumpEl: HTMLElement | null;
+  private keyDashEl: HTMLElement | null;
+
   constructor(
     perkManager: PerkManager,
     onStartMatchClick: () => void,
     onRematchClick: () => void,
-    onToggleCameraMode?: () => void
+    onToggleCameraMode?: () => void,
+    onCycleSpectator?: (dir: 1 | -1) => void
   ) {
     this.upsValueEl = document.getElementById('hud-ups-value');
     this.upsUnitEl = document.getElementById('hud-ups-unit');
@@ -46,6 +76,35 @@ export class HudController {
     this.dangerVignetteEl = document.getElementById('laser-danger-vignette');
     this.actionPromptBannerEl = document.getElementById('action-prompt-banner');
     this.camModeEl = document.getElementById('hud-cam-mode');
+
+    this.spectatorPanelEl = document.getElementById('spectator-panel');
+    this.spectatorTargetNameEl = document.getElementById(
+      'spectator-target-name'
+    );
+    this.spectatorSubHintEl = document.getElementById('spectator-sub-hint');
+    this.inputOwnerEl = document.getElementById('hud-input-owner');
+    this.cursorDeltaEl = document.getElementById('hud-cursor-delta');
+    this.cursorDotEl = document.getElementById('hud-cursor-dot');
+    this.cursorDirLeftEl = document.getElementById('hud-cursor-dir-left');
+    this.cursorDirRightEl = document.getElementById('hud-cursor-dir-right');
+    this.keyWEl = document.getElementById('hud-key-w');
+    this.keyAEl = document.getElementById('hud-key-a');
+    this.keySEl = document.getElementById('hud-key-s');
+    this.keyDEl = document.getElementById('hud-key-d');
+    this.keyJumpEl = document.getElementById('hud-key-jump');
+    this.keyDashEl = document.getElementById('hud-key-dash');
+
+    const prevSpecBtn = document.getElementById('spec-prev-btn');
+    prevSpecBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onCycleSpectator?.(-1);
+    });
+
+    const nextSpecBtn = document.getElementById('spec-next-btn');
+    nextSpecBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onCycleSpectator?.(1);
+    });
 
     this.camModeEl?.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -140,9 +199,25 @@ export class HudController {
     countdownRemaining: number,
     wallZ: number,
     localPlayerId: string,
-    allPlayers: RemotePlayerSnapshot[]
+    allPlayers: RemotePlayerSnapshot[],
+    localInputTelemetry?: PlayerInputTelemetry,
+    spectatorState?: SpectatorHudState
   ): void {
-    const ups = Math.round(physics.ups);
+    const specTarget =
+      spectatorState?.active && spectatorState.target
+        ? spectatorState.target
+        : null;
+
+    const ups = Math.round(specTarget ? specTarget.ups : physics.ups);
+    const topUps = Math.round(specTarget ? specTarget.topUps : physics.topUps);
+    const sync = Math.round(
+      specTarget ? specTarget.strafeSync : physics.strafeSync
+    );
+    const bhopChain = specTarget
+      ? specTarget.bhopChain ?? 0
+      : physics.bhopChain;
+    const activeDistance = specTarget ? specTarget.distance : physics.distance;
+    const activePosZ = specTarget ? specTarget.z : physics.pos.z;
 
     // 1. Live UPS Speedometer with CS/KZ tier color styling
     if (this.upsValueEl) {
@@ -157,11 +232,12 @@ export class HudController {
       }
     }
     if (this.upsUnitEl) {
-      this.upsUnitEl.textContent = `UPS (TOP ${Math.round(physics.topUps)})`;
+      this.upsUnitEl.textContent = specTarget
+        ? `${specTarget.name} UPS (TOP ${topUps})`
+        : `UPS (TOP ${topUps})`;
     }
 
     // 2. Strafe Sync HUD Indicator
-    const sync = physics.strafeSync;
     if (this.syncFillEl) {
       this.syncFillEl.style.width = `${Math.min(100, Math.max(0, sync))}%`;
     }
@@ -170,12 +246,18 @@ export class HudController {
     }
     if (this.bhopChainEl) {
       this.bhopChainEl.textContent =
-        physics.bhopChain > 1 ? `BHOP CHAIN x${physics.bhopChain}` : 'BHOP READY';
+        bhopChain > 1 ? `BHOP CHAIN x${bhopChain}` : 'BHOP READY';
     }
 
     // 3. Dash & Double Jump Charge Indicators
     if (this.dashStatusEl) {
-      if (physics.dashCooldownTimer <= 0) {
+      if (specTarget) {
+        const isDashing = Boolean(specTarget.inputs?.dash);
+        this.dashStatusEl.textContent = isDashing
+          ? 'CONC DASH [ACTIVE]'
+          : 'CONC DASH [READY]';
+        this.dashStatusEl.classList.add('ready');
+      } else if (physics.dashCooldownTimer <= 0) {
         this.dashStatusEl.textContent = 'CONC DASH [READY]';
         this.dashStatusEl.classList.add('ready');
       } else {
@@ -184,20 +266,25 @@ export class HudController {
       }
     }
     if (this.djumpStatusEl) {
-      this.djumpStatusEl.textContent = `AIR JUMP [${physics.remainingAirJumps}]`;
-      if (physics.remainingAirJumps > 0) {
+      if (specTarget) {
+        this.djumpStatusEl.textContent = `SPEC CHASE CAM`;
         this.djumpStatusEl.classList.add('ready');
       } else {
-        this.djumpStatusEl.classList.remove('ready');
+        this.djumpStatusEl.textContent = `AIR JUMP [${physics.remainingAirJumps}]`;
+        if (physics.remainingAirJumps > 0) {
+          this.djumpStatusEl.classList.add('ready');
+        } else {
+          this.djumpStatusEl.classList.remove('ready');
+        }
       }
     }
 
     // 4. Distance & Derezzing Wall Proximity + Danger Vignette & Intuitive Prompts
-    const distMeters = Math.round(physics.distance / 32);
+    const distMeters = Math.round(activeDistance / 32);
     if (this.distanceTextEl) {
-      this.distanceTextEl.textContent = `${distMeters}m (${Math.round(physics.distance)}u)`;
+      this.distanceTextEl.textContent = `${distMeters}m (${Math.round(activeDistance)}u)`;
     }
-    const gapUnits = Math.max(0, Math.round(wallZ - physics.pos.z));
+    const gapUnits = Math.max(0, Math.round(wallZ - activePosZ));
     const gapMeters = Math.round(gapUnits / 32);
     if (this.wallDistTextEl) {
       this.wallDistTextEl.textContent = `${gapMeters}m`;
@@ -212,12 +299,91 @@ export class HudController {
       }
     }
 
+    // Spectator Chase Cam Panel & Action Prompt Banner
+    if (this.spectatorPanelEl) {
+      if (spectatorState?.active && specTarget) {
+        this.spectatorPanelEl.style.display = 'flex';
+        const hex = `#${(specTarget.color || 0x00f3ff).toString(16).padStart(6, '0')}`;
+        this.spectatorPanelEl.style.borderColor = hex;
+        if (this.spectatorTargetNameEl) {
+          this.spectatorTargetNameEl.textContent = `${specTarget.name} (${spectatorState.targetIndex + 1}/${spectatorState.aliveCount})`;
+          this.spectatorTargetNameEl.style.color = hex;
+        }
+        if (this.spectatorSubHintEl) {
+          this.spectatorSubHintEl.textContent =
+            spectatorState.aliveCount > 1
+              ? 'CLICK OR PRESS [A / D / ← / → / TAB] TO CYCLE REMAINING PLAYERS'
+              : 'FOLLOWING LAST REMAINING RUNNER ON THE GRID';
+        }
+      } else {
+        this.spectatorPanelEl.style.display = 'none';
+      }
+    }
+
+    // Live Button Movements & Cursor Movements HUD (shows spectated player's inputs when spectating, or local player's when alive)
+    const activeInputs: PlayerInputTelemetry = specTarget?.inputs
+      ? {
+          ...specTarget.inputs,
+          mouseDx: spectatorState?.smoothedMouseDx ?? specTarget.inputs.mouseDx,
+          mouseDy: spectatorState?.smoothedMouseDy ?? specTarget.inputs.mouseDy,
+        }
+      : localInputTelemetry ?? {
+          w: false,
+          a: false,
+          s: false,
+          d: false,
+          jump: false,
+          dash: false,
+          mouseDx: 0,
+          mouseDy: 0,
+        };
+
+    if (this.inputOwnerEl) {
+      if (specTarget) {
+        const hex = `#${(specTarget.color || 0x00f3ff).toString(16).padStart(6, '0')}`;
+        this.inputOwnerEl.textContent = `SPECTATING // ${specTarget.name}`;
+        this.inputOwnerEl.style.color = hex;
+      } else {
+        this.inputOwnerEl.textContent = 'INPUT TELEMETRY // YOU';
+        this.inputOwnerEl.style.color = 'var(--neon-cyan)';
+      }
+    }
+
+    this.keyWEl?.classList.toggle('active', Boolean(activeInputs.w));
+    this.keyAEl?.classList.toggle('active', Boolean(activeInputs.a));
+    this.keySEl?.classList.toggle('active', Boolean(activeInputs.s));
+    this.keyDEl?.classList.toggle('active', Boolean(activeInputs.d));
+    this.keyJumpEl?.classList.toggle('active', Boolean(activeInputs.jump));
+    this.keyDashEl?.classList.toggle('active', Boolean(activeInputs.dash));
+
+    const dx = activeInputs.mouseDx || 0;
+    const dy = activeInputs.mouseDy || 0;
+    const maxPadOffset = 26;
+    const offsetX = Math.max(
+      -maxPadOffset,
+      Math.min(maxPadOffset, (dx / 100) * maxPadOffset)
+    );
+    const offsetY = Math.max(
+      -maxPadOffset,
+      Math.min(maxPadOffset, (dy / 100) * maxPadOffset)
+    );
+
+    if (this.cursorDotEl) {
+      this.cursorDotEl.style.transform = `translate(calc(-50% + ${offsetX.toFixed(1)}px), calc(-50% + ${offsetY.toFixed(1)}px))`;
+    }
+    if (this.cursorDeltaEl) {
+      this.cursorDeltaEl.textContent = `AIM Δ ${Math.round(dx)}, ${Math.round(dy)}`;
+    }
+    this.cursorDirLeftEl?.classList.toggle('active', dx < -1.5);
+    this.cursorDirRightEl?.classList.toggle('active', dx > 1.5);
+
     if (this.actionPromptBannerEl) {
       if (!physics.alive) {
         this.actionPromptBannerEl.style.opacity = '1';
         this.actionPromptBannerEl.classList.add('danger');
-        this.actionPromptBannerEl.textContent =
-          '⚠ DEREZZED BY LASER HAZARD — RESPAWNING ON GRID...';
+        this.actionPromptBannerEl.textContent = specTarget
+          ? `⚠ DEREZZED — SPECTATING ${specTarget.name} (CHASE CAM)`
+          : '⚠ DEREZZED BY LASER HAZARD — AWAITING NEXT ROUND...';
       } else if (matchState === 'ACTIVE' && gapUnits < 680) {
         this.actionPromptBannerEl.style.opacity = '1';
         this.actionPromptBannerEl.classList.add('danger');

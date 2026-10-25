@@ -339,4 +339,130 @@ test.describe('GRIDRUNNER — GoldSrc 100Hz Cyber-Bhop Verification Suite', () =
     await expect(page.locator('#hud-sync-fill')).toBeVisible();
     await expect(page.locator('#hud-ups-value')).toHaveClass(/tier-cyan|tier-magenta/);
   });
+
+  test('Milestone 5 — Spectator Chase Cam on Death, Cycling Remaining Players & Live Button/Cursor HUD Telemetry', async ({
+    browser,
+  }) => {
+    const context1 = await browser.newContext();
+    const context2 = await browser.newContext();
+    const context3 = await browser.newContext();
+    const page1 = await context1.newPage();
+    const page2 = await context2.newPage();
+    const page3 = await context3.newPage();
+
+    const roomName = `e2e_spec_${Date.now()}`;
+    await Promise.all([
+      page1.goto(`/?room=${roomName}`),
+      page2.goto(`/?room=${roomName}`),
+      page3.goto(`/?room=${roomName}`),
+    ]);
+
+    // Wait for all 3 clients to connect and see 2 remote players each
+    await Promise.all([
+      page1.waitForFunction(() => window.__GAME_STATE__?.remotePlayersCount === 2, null, { timeout: 10000 }),
+      page2.waitForFunction(() => window.__GAME_STATE__?.remotePlayersCount === 2, null, { timeout: 10000 }),
+      page3.waitForFunction(() => window.__GAME_STATE__?.remotePlayersCount === 2, null, { timeout: 10000 }),
+    ]);
+
+    // Start match in instant ACTIVE mode
+    await page1.evaluate(() => {
+      window.__GAME_CONTROLS__.startMatch(true, 999111);
+    });
+
+    await Promise.all([
+      page1.waitForFunction(() => window.__GAME_STATE__?.matchState === 'ACTIVE'),
+      page2.waitForFunction(() => window.__GAME_STATE__?.matchState === 'ACTIVE'),
+      page3.waitForFunction(() => window.__GAME_STATE__?.matchState === 'ACTIVE'),
+    ]);
+
+    // Switch Player 1 to FIRST_PERSON first, then kill Player 1 to verify Spectator forces CHASE cam
+    await page1.evaluate(() => {
+      window.__GAME_CONTROLS__.setCameraMode('FIRST_PERSON');
+      window.__GAME_CONTROLS__.killLocalPlayer();
+    });
+
+    await page1.waitForFunction(
+      () =>
+        window.__GAME_STATE__?.spectator.active === true &&
+        window.__GAME_STATE__?.spectator.aliveSpectatableCount === 2 &&
+        window.__GAME_STATE__?.cameraMode === 'CHASE'
+    );
+
+    await expect(page1.locator('#spectator-panel')).toBeVisible();
+    const firstTargetId = await page1.evaluate(
+      () => window.__GAME_STATE__.spectator.targetPlayerId
+    );
+    expect(firstTargetId).toBeTruthy();
+
+    // Cycle to the next remaining player using the HUD NEXT button
+    await page1.locator('#spec-next-btn').click();
+    const secondTargetId = await page1.evaluate(
+      () => window.__GAME_STATE__.spectator.targetPlayerId
+    );
+    expect(secondTargetId).toBeTruthy();
+    expect(secondTargetId).not.toEqual(firstTargetId);
+
+    // Cycle back to the first target using keyboard ArrowLeft
+    await page1.keyboard.press('ArrowLeft');
+    const cycledBackId = await page1.evaluate(
+      () => window.__GAME_STATE__.spectator.targetPlayerId
+    );
+    expect(cycledBackId).toEqual(firstTargetId);
+
+    // Have both Player 2 and Player 3 perform air-strafe left (holding A + Jump + Dash + turning mouse left)
+    const driveSpectatedInputs = async (p: typeof page2) => {
+      await p.evaluate(() => {
+        const ctrl = window.__GAME_CONTROLS__;
+        ctrl.resetPlayer(true);
+        let yaw = 0;
+        for (let t = 0; t < 30; t++) {
+          yaw += 0.025; // Turning left (mouseDx < 0)
+          ctrl.stepPhysicsTicks(1, {
+            fmove: 320,
+            smove: -320, // Holding A + W
+            viewYaw: yaw,
+            jumpHeld: true,
+            jumpEdge: t === 0,
+            dashPressed: t === 25,
+          });
+        }
+        ctrl.setMoveOverride({
+          fmove: 320,
+          smove: -320,
+          viewYaw: yaw,
+          jumpHeld: true,
+          dashPressed: true,
+        });
+      });
+    };
+
+    await Promise.all([driveSpectatedInputs(page2), driveSpectatedInputs(page3)]);
+
+    // Wait for Player 1's spectator HUD to receive the spectated player's live button & cursor movements
+    await page1.waitForFunction(
+      () => {
+        const t = window.__GAME_STATE__?.spectator.targetInputs;
+        return Boolean(
+          t && t.w && t.a && t.jump && Math.abs(t.mouseDx) > 2
+        );
+      },
+      null,
+      { timeout: 10000 }
+    );
+
+    // Verify HUD button keycaps and cursor dot deflection are rendered on Player 1's screen
+    await expect(page1.locator('#hud-key-w')).toHaveClass(/active/);
+    await expect(page1.locator('#hud-key-a')).toHaveClass(/active/);
+    await expect(page1.locator('#hud-key-jump')).toHaveClass(/active/);
+    await expect(page1.locator('#hud-cursor-dir-left')).toHaveClass(/active/);
+
+    const dotTransform = await page1
+      .locator('#hud-cursor-dot')
+      .evaluate((el) => (el as HTMLElement).style.transform);
+    expect(dotTransform).not.toBe('translate(calc(-50% + 0.0px), calc(-50% + 0.0px))');
+
+    await context1.close();
+    await context2.close();
+    await context3.close();
+  });
 });
