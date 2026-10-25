@@ -1,3 +1,4 @@
+import { PlayerInputTelemetry } from '../network/NetworkClient';
 import { MoveCmd } from '../physics/PlayerPhysics';
 
 export class InputManager {
@@ -8,6 +9,20 @@ export class InputManager {
   private dashPending = false;
   private scrollJumpCallback?: () => void;
   private toggleCameraCallback?: () => void;
+  private cycleSpectatorCallback?: (dir: 1 | -1) => void;
+  private isSpectatingCheck?: () => boolean;
+
+  // Cursor / Mouse telemetry tracking
+  private accumMouseDx = 0;
+  private accumMouseDy = 0;
+  private lastClientX: number | null = null;
+  private lastClientY: number | null = null;
+  private prevTelemetryYaw = 0;
+  private prevTelemetryPitch = 0;
+  public smoothedMouseDx = 0;
+  public smoothedMouseDy = 0;
+  private jumpLatchTimer = 0;
+  private dashLatchTimer = 0;
 
   // Mobile Touch state
   private touchJoyX = 0; // -1..1
@@ -27,19 +42,45 @@ export class InputManager {
     canvas: HTMLCanvasElement,
     onScrollJump?: () => void,
     onAudioUnlock?: () => void,
-    onToggleCameraMode?: () => void
+    onToggleCameraMode?: () => void,
+    onCycleSpectator?: (dir: 1 | -1) => void,
+    isSpectatingCheck?: () => boolean
   ) {
     this.scrollJumpCallback = onScrollJump;
     this.toggleCameraCallback = onToggleCameraMode;
+    this.cycleSpectatorCallback = onCycleSpectator;
+    this.isSpectatingCheck = isSpectatingCheck;
 
     window.addEventListener('keydown', (e) => {
       const code = e.code;
+      if (this.isSpectatingCheck?.()) {
+        if (
+          code === 'ArrowRight' ||
+          code === 'KeyD' ||
+          code === 'KeyE' ||
+          code === 'BracketRight' ||
+          code === 'Tab'
+        ) {
+          if (code === 'Tab') e.preventDefault();
+          this.cycleSpectatorCallback?.(1);
+        } else if (
+          code === 'ArrowLeft' ||
+          code === 'KeyA' ||
+          code === 'KeyQ' ||
+          code === 'BracketLeft'
+        ) {
+          this.cycleSpectatorCallback?.(-1);
+        }
+      }
+
       if (!this.keys.has(code)) {
         if (code === 'Space') {
           this.jumpEdgePending = true;
+          this.jumpLatchTimer = 0.12;
         }
         if (code === 'ShiftLeft' || code === 'ShiftRight') {
           this.dashPending = true;
+          this.dashLatchTimer = 0.16;
         }
         if (code === 'KeyV' || code === 'KeyC') {
           this.toggleCameraCallback?.();
@@ -53,9 +94,13 @@ export class InputManager {
       this.keys.delete(e.code);
     });
 
-    // PointerLock Mouse Look on Canvas Click
+    // PointerLock Mouse Look on Canvas Click (or cycle spectator target if spectating)
     canvas.addEventListener('click', () => {
       onAudioUnlock?.();
+      if (this.isSpectatingCheck?.()) {
+        this.cycleSpectatorCallback?.(1);
+        return;
+      }
       if (document.pointerLockElement !== canvas && canvas.requestPointerLock) {
         try {
           canvas.requestPointerLock();
@@ -65,18 +110,36 @@ export class InputManager {
       }
     });
 
-    // Right-click Impulse Dash
+    // Right-click Impulse Dash (or cycle previous spectator target if spectating)
     window.addEventListener('contextmenu', (e) => {
       e.preventDefault();
     });
     canvas.addEventListener('mousedown', (e) => {
       onAudioUnlock?.();
+      if (this.isSpectatingCheck?.()) {
+        if (e.button === 2) {
+          this.cycleSpectatorCallback?.(-1);
+        }
+        return;
+      }
       if (e.button === 2) {
         this.dashPending = true;
+        this.dashLatchTimer = 0.16;
       }
     });
 
     window.addEventListener('mousemove', (e) => {
+      const dx =
+        e.movementX ||
+        (this.lastClientX !== null ? e.clientX - this.lastClientX : 0);
+      const dy =
+        e.movementY ||
+        (this.lastClientY !== null ? e.clientY - this.lastClientY : 0);
+      this.lastClientX = e.clientX;
+      this.lastClientY = e.clientY;
+      this.accumMouseDx += dx;
+      this.accumMouseDy += dy;
+
       if (document.pointerLockElement === canvas) {
         const yawSensitivity = 0.0022;
         const pitchSensitivity = 0.0017;
@@ -96,6 +159,7 @@ export class InputManager {
       (e) => {
         if (e.deltaY !== 0) {
           this.jumpEdgePending = true;
+          this.jumpLatchTimer = 0.12;
           this.scrollJumpCallback?.();
         }
       },
@@ -179,6 +243,8 @@ export class InputManager {
               const dy = t.clientY - this.lastLookTouchY;
               this.lastLookTouchX = t.clientX;
               this.lastLookTouchY = t.clientY;
+              this.accumMouseDx += dx * 2.2;
+              this.accumMouseDy += dy * 2.2;
               this.viewYaw -= dx * 0.0052;
               this.viewPitch = Math.max(
                 -0.65,
@@ -209,6 +275,7 @@ export class InputManager {
           onAudioUnlock?.();
           this.touchJumpHeld = true;
           this.jumpEdgePending = true;
+          this.jumpLatchTimer = 0.12;
         },
         { passive: false }
       );
@@ -220,6 +287,7 @@ export class InputManager {
       jumpBtn.addEventListener('mousedown', () => {
         this.touchJumpHeld = true;
         this.jumpEdgePending = true;
+        this.jumpLatchTimer = 0.12;
       });
       jumpBtn.addEventListener('mouseup', releaseJump);
     }
@@ -231,11 +299,13 @@ export class InputManager {
           e.preventDefault();
           onAudioUnlock?.();
           this.dashPending = true;
+          this.dashLatchTimer = 0.16;
         },
         { passive: false }
       );
       dashBtn.addEventListener('mousedown', () => {
         this.dashPending = true;
+        this.dashLatchTimer = 0.16;
       });
     }
   }
@@ -312,5 +382,74 @@ export class InputManager {
       jumpEdge,
       dashPressed,
     };
+  }
+
+  public getInputTelemetry(
+    cmd: MoveCmd,
+    dt: number,
+    isDashing = false
+  ): PlayerInputTelemetry {
+    if (cmd.jumpEdge || cmd.jumpHeld) {
+      this.jumpLatchTimer = Math.max(this.jumpLatchTimer, cmd.jumpHeld ? 0.04 : 0.12);
+    } else {
+      this.jumpLatchTimer = Math.max(0, this.jumpLatchTimer - dt);
+    }
+
+    if (cmd.dashPressed || isDashing) {
+      this.dashLatchTimer = Math.max(this.dashLatchTimer, 0.16);
+    } else {
+      this.dashLatchTimer = Math.max(0, this.dashLatchTimer - dt);
+    }
+
+    const yawDelta = cmd.viewYaw - this.prevTelemetryYaw;
+    const pitchDelta = this.viewPitch - this.prevTelemetryPitch;
+    this.prevTelemetryYaw = cmd.viewYaw;
+    this.prevTelemetryPitch = this.viewPitch;
+
+    // Convert yaw/pitch delta to equivalent mouse movement if raw mousemove wasn't fired (e.g. automated tests / touch)
+    const yawEquivalentDx = -yawDelta / 0.0022;
+    const pitchEquivalentDy = -pitchDelta / 0.0017;
+
+    const frameDx =
+      Math.abs(this.accumMouseDx) > 0.01 ? this.accumMouseDx : yawEquivalentDx;
+    const frameDy =
+      Math.abs(this.accumMouseDy) > 0.01 ? this.accumMouseDy : pitchEquivalentDy;
+
+    this.accumMouseDx = 0;
+    this.accumMouseDy = 0;
+
+    // Normalize cursor velocity into a responsive visual range (-100..+100)
+    const safeDt = Math.max(0.004, Math.min(0.1, dt));
+    const targetDx = Math.max(-100, Math.min(100, (frameDx / safeDt) * 0.065));
+    const targetDy = Math.max(-100, Math.min(100, (frameDy / safeDt) * 0.065));
+
+    const blend = Math.min(1, safeDt * 22);
+    this.smoothedMouseDx += (targetDx - this.smoothedMouseDx) * blend;
+    this.smoothedMouseDy += (targetDy - this.smoothedMouseDy) * blend;
+
+    if (Math.abs(this.smoothedMouseDx) < 0.2) this.smoothedMouseDx = 0;
+    if (Math.abs(this.smoothedMouseDy) < 0.2) this.smoothedMouseDy = 0;
+
+    return {
+      w: cmd.fmove > 0,
+      s: cmd.fmove < 0,
+      a: cmd.smove < 0,
+      d: cmd.smove > 0,
+      jump: cmd.jumpHeld || cmd.jumpEdge || this.jumpLatchTimer > 0,
+      dash: cmd.dashPressed || isDashing || this.dashLatchTimer > 0,
+      mouseDx: Math.round(this.smoothedMouseDx * 10) / 10,
+      mouseDy: Math.round(this.smoothedMouseDy * 10) / 10,
+    };
+  }
+
+  public resetTelemetry(yaw = 0, pitch = 0): void {
+    this.prevTelemetryYaw = yaw;
+    this.prevTelemetryPitch = pitch;
+    this.accumMouseDx = 0;
+    this.accumMouseDy = 0;
+    this.smoothedMouseDx = 0;
+    this.smoothedMouseDy = 0;
+    this.jumpLatchTimer = 0;
+    this.dashLatchTimer = 0;
   }
 }

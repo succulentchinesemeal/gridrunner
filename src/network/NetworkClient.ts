@@ -3,6 +3,17 @@ import { PlayerRig } from '../renderer/PlayerRig';
 
 export type MatchState = 'LOBBY' | 'COUNTDOWN' | 'ACTIVE' | 'PODIUM';
 
+export interface PlayerInputTelemetry {
+  w: boolean;
+  a: boolean;
+  s: boolean;
+  d: boolean;
+  jump: boolean;
+  dash: boolean;
+  mouseDx: number;
+  mouseDy: number;
+}
+
 export interface RemotePlayerSnapshot {
   id: string;
   name: string;
@@ -14,19 +25,27 @@ export interface RemotePlayerSnapshot {
   vy: number;
   vz: number;
   yaw: number;
+  pitch?: number;
   state: 'grounded' | 'airborne' | 'dashing' | 'dead';
   ups: number;
   topUps: number;
   strafeSync: number;
   alive: boolean;
   distance: number;
+  bhopChain?: number;
+  inputs?: PlayerInputTelemetry;
 }
 
-interface RemotePlayerEntity {
+export interface RemotePlayerEntity {
   snapshot: RemotePlayerSnapshot;
   renderPos: THREE.Vector3;
   renderVel: THREE.Vector3;
   renderYaw: number;
+  renderPitch: number;
+  smoothedMouseDx: number;
+  smoothedMouseDy: number;
+  prevJump: boolean;
+  prevDash: boolean;
   rig: PlayerRig;
 }
 
@@ -178,6 +197,11 @@ export class NetworkClient {
           renderPos: new THREE.Vector3(p.x, p.y, p.z),
           renderVel: new THREE.Vector3(p.vx, p.vy, p.vz),
           renderYaw: p.yaw,
+          renderPitch: p.pitch ?? 0,
+          smoothedMouseDx: p.inputs?.mouseDx ?? 0,
+          smoothedMouseDy: p.inputs?.mouseDy ?? 0,
+          prevJump: Boolean(p.inputs?.jump),
+          prevDash: Boolean(p.inputs?.dash),
           rig,
         };
         this.remotePlayers.set(p.id, entity);
@@ -196,11 +220,14 @@ export class NetworkClient {
 
   public updateAndSend(
     dt: number,
-    localState: Omit<RemotePlayerSnapshot, 'id' | 'name' | 'color'>
+    localState: Omit<RemotePlayerSnapshot, 'id' | 'name' | 'color'>,
+    forceSend = false
   ): void {
     // Smoothly interpolate all remote players in 3D space
     for (const entity of this.remotePlayers.values()) {
       const s = entity.snapshot;
+      entity.rig.setVisible(s.alive);
+
       const targetPos = new THREE.Vector3(s.x, s.y, s.z);
       // Dead-reckoning assist + smooth lerp
       targetPos.x += s.vx * 0.02;
@@ -214,7 +241,41 @@ export class NetworkClient {
       }
 
       entity.renderVel.set(s.vx, s.vy, s.vz);
-      entity.renderYaw += (s.yaw - entity.renderYaw) * Math.min(1, dt * 16);
+      if (Math.abs(s.yaw - entity.renderYaw) > Math.PI * 2) {
+        entity.renderYaw = s.yaw;
+      } else {
+        entity.renderYaw += (s.yaw - entity.renderYaw) * Math.min(1, dt * 16);
+      }
+      const targetPitch = s.pitch ?? 0;
+      entity.renderPitch +=
+        (targetPitch - entity.renderPitch) * Math.min(1, dt * 16);
+
+      const targetMouseDx = s.inputs?.mouseDx ?? 0;
+      const targetMouseDy = s.inputs?.mouseDy ?? 0;
+      entity.smoothedMouseDx +=
+        (targetMouseDx - entity.smoothedMouseDx) * Math.min(1, dt * 20);
+      entity.smoothedMouseDy +=
+        (targetMouseDy - entity.smoothedMouseDy) * Math.min(1, dt * 20);
+
+      const jumpNow = Boolean(s.inputs?.jump);
+      const dashNow = Boolean(s.inputs?.dash) || s.state === 'dashing';
+      if (jumpNow && !entity.prevJump) {
+        entity.rig.triggerJumpAnim(false);
+      }
+      if (dashNow && !entity.prevDash) {
+        entity.rig.triggerDashAnim();
+      }
+      entity.prevJump = jumpNow;
+      entity.prevDash = dashNow;
+
+      const smove = s.inputs
+        ? (s.inputs.d ? 320 : 0) - (s.inputs.a ? 320 : 0)
+        : 0;
+      const fmove = s.inputs
+        ? (s.inputs.w ? 320 : 0) - (s.inputs.s ? 320 : 0)
+        : s.ups > 20
+        ? 320
+        : 0;
 
       entity.rig.updateTransform(
         entity.renderPos,
@@ -226,16 +287,16 @@ export class NetworkClient {
           ups: s.ups,
           vel: entity.renderVel,
           viewYaw: entity.renderYaw,
-          smove: 0,
-          fmove: s.ups > 20 ? 320 : 0,
-          isDashing: s.state === 'dashing',
+          smove,
+          fmove,
+          isDashing: dashNow,
         }
       );
     }
 
-    // 25Hz client-authoritative position & UPS broadcast
+    // 25Hz client-authoritative position, UPS & input telemetry broadcast
     this.sendAccumulator += dt;
-    if (this.sendAccumulator >= NetworkClient.SEND_INTERVAL) {
+    if (forceSend || this.sendAccumulator >= NetworkClient.SEND_INTERVAL) {
       this.sendAccumulator = 0;
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(
@@ -276,5 +337,15 @@ export class NetworkClient {
 
   public getRemoteSnapshots(): RemotePlayerSnapshot[] {
     return Array.from(this.remotePlayers.values()).map((e) => e.snapshot);
+  }
+
+  public getAliveRemoteEntities(): RemotePlayerEntity[] {
+    return Array.from(this.remotePlayers.values()).filter(
+      (e) => e.snapshot.alive
+    );
+  }
+
+  public getRemoteEntity(id: string): RemotePlayerEntity | undefined {
+    return this.remotePlayers.get(id);
   }
 }
