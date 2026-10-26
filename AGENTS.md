@@ -19,8 +19,9 @@ All AI coding agents (Antigravity, Gemini Flash, Gemini Argon, subagents) workin
 4. **Atomic Commits After Every Working Step**:
    - Do not accumulate thousands of uncommitted lines across 10 files.
    - As soon as a logical sub-step compiles (`npm run build`) and passes physics checks (`npm run test:physics`), make an atomic commit (`git commit -m "feat(scope): summary"`).
-5. **NEVER Auto-Merge to `master`**:
+5. **NEVER Auto-Merge to `master` or Auto-Push to `origin/master`**:
    - **Do NOT merge your feature branch into `master`** unless the user explicitly instructs you to `"merge to master"` or `"lock this in"`.
+   - **NEVER run `git push origin master`** unless explicitly asked—`origin/master` is connected to the live Render production relic! Push new work to `origin/v2` or feature branches instead.
    - Finish your task on the feature branch, run `npm run snapshot`, and report the branch name and commit hash so the user can test and roll back at any time.
 
 ---
