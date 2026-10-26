@@ -9,6 +9,7 @@ export class InputManager {
   private dashPending = false;
   private scrollJumpCallback?: () => void;
   private toggleCameraCallback?: () => void;
+  private toggleCollisionsCallback?: () => void;
   private cycleSpectatorCallback?: (dir: 1 | -1) => void;
   private isSpectatingCheck?: () => boolean;
 
@@ -44,12 +45,14 @@ export class InputManager {
     onAudioUnlock?: () => void,
     onToggleCameraMode?: () => void,
     onCycleSpectator?: (dir: 1 | -1) => void,
-    isSpectatingCheck?: () => boolean
+    isSpectatingCheck?: () => boolean,
+    onToggleCollisions?: () => void
   ) {
     this.scrollJumpCallback = onScrollJump;
     this.toggleCameraCallback = onToggleCameraMode;
     this.cycleSpectatorCallback = onCycleSpectator;
     this.isSpectatingCheck = isSpectatingCheck;
+    this.toggleCollisionsCallback = onToggleCollisions;
 
     window.addEventListener('keydown', (e) => {
       const code = e.code;
@@ -82,8 +85,11 @@ export class InputManager {
           this.dashPending = true;
           this.dashLatchTimer = 0.16;
         }
-        if (code === 'KeyV' || code === 'KeyC') {
+        if (code === 'KeyV') {
           this.toggleCameraCallback?.();
+        }
+        if (code === 'KeyC') {
+          this.toggleCollisionsCallback?.();
         }
       }
       this.keys.add(code);

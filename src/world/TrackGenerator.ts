@@ -1,9 +1,21 @@
 import * as THREE from 'three';
-import { CollisionWorld } from '../physics/PlayerPhysics';
+import { AABBBox, CollisionResult, CollisionWorld, SurfRampCollider } from '../physics/PlayerPhysics';
+import { createCyberDeckMaterial } from '../renderer/TronRenderer';
+import {
+  getObstaclePillarTexture,
+  getFroggerHazardTexture,
+  getRampTextures,
+} from '../renderer/TextureGenerator';
 import { SeededRandom } from './SeededRandom';
+
+export type TrackMode = 'FLOW' | 'COMPETITIVE';
 
 export type ChunkArchetype =
   | 'RUNWAY'
+  | 'CANYON_WAVE'
+  | 'SPLIT_ELEVATION'
+  | 'HALFPIPE_CARVE'
+  | 'SKY_ARCHIPELAGO'
   | 'SLALOM'
   | 'FROGGER'
   | 'KZ_CHASM'
@@ -55,6 +67,7 @@ export interface TrackChunk {
   obstacles: ObstacleBox[];
   boostPads: BoostPad[];
   chasms: ChasmGap[];
+  surfRamps: SurfRampCollider[];
 }
 
 export class TrackGenerator implements CollisionWorld {
@@ -68,6 +81,12 @@ export class TrackGenerator implements CollisionWorld {
   public totalSpawnedChunks = 0;
   public totalDespawnedChunks = 0;
 
+  /** Default 'FLOW' mode (5 obstacle-free multi-line playground chunks) vs 'COMPETITIVE' mode */
+  public trackMode: TrackMode = 'FLOW';
+
+  /** Whether strict solid platform and obstacle collisions are enabled (Skill / Competitive element) */
+  public strictCollisions = false;
+
   /** If true, disables hazards/chasms for pure flat-ground physics unit tests */
   public flatTestMode = false;
 
@@ -79,9 +98,15 @@ export class TrackGenerator implements CollisionWorld {
   private wallMesh: THREE.Group;
   private lastBoostPadTime = -10;
 
-  // Shared materials for crisp neon performance
+  // Shared PBR & Neon Materials
   private deckMaterial: THREE.MeshStandardMaterial;
-  private platformMaterial: THREE.MeshStandardMaterial;
+  private skyDeckMaterial: THREE.MeshStandardMaterial;
+  private hexIslandMaterial: THREE.MeshStandardMaterial;
+  private surfWaveMaterial: THREE.MeshStandardMaterial;
+  private curbMaterial: THREE.MeshStandardMaterial;
+  private parapetMaterial: THREE.MeshStandardMaterial;
+  private hazardMaterial: THREE.MeshStandardMaterial;
+  private thrusterConeMaterial: THREE.MeshBasicMaterial;
   private cyanLineMaterial: THREE.LineBasicMaterial;
   private magentaLineMaterial: THREE.LineBasicMaterial;
   private limeLineMaterial: THREE.LineBasicMaterial;
@@ -91,25 +116,132 @@ export class TrackGenerator implements CollisionWorld {
   private bridgeMaterial: THREE.MeshStandardMaterial;
   private boostPadMaterial: THREE.MeshBasicMaterial;
   private archMaterial: THREE.MeshBasicMaterial;
+  private lightCapMat: THREE.MeshBasicMaterial;
 
-  constructor(scene: THREE.Scene, initialSeed = 1337) {
+  // Pre-built and cached 3D Hardware Geometries (Zero Main-Thread Geometry Hitching)
+  private cachedDeckGeo: THREE.BoxGeometry;
+  private cachedDeckHalfGeo: THREE.BoxGeometry;
+  private cachedBridgeGeo: THREE.BoxGeometry;
+  private cachedCurbLeftGeo: THREE.ExtrudeGeometry;
+  private cachedCurbRightGeo: THREE.ExtrudeGeometry;
+  private cachedCurbLinesGeo: THREE.BufferGeometry;
+  private cachedPylonGeo: THREE.BoxGeometry;
+  private cachedLightCapGeo: THREE.BoxGeometry;
+  private cachedLaunchWedge30Geo: THREE.ExtrudeGeometry;
+  private cachedCanyonPrism50Geo: THREE.ExtrudeGeometry;
+  private cachedSplitSkyHighwayGeo: THREE.ExtrudeGeometry;
+  private cachedParapetWallGeo: THREE.ExtrudeGeometry;
+  private cachedThrusterConeGeo: THREE.ConeGeometry;
+  private cachedDiamondIslandGeo: THREE.ExtrudeGeometry;
+  private cachedHexLilyPadGeo: THREE.ExtrudeGeometry;
+  private cachedSurfRail950Geo: THREE.ExtrudeGeometry;
+  private cachedCatwalkGeo: THREE.ExtrudeGeometry;
+  private cachedSkyBridgeGeo: THREE.ExtrudeGeometry;
+  private cachedHoloChevronArchGeo: THREE.ExtrudeGeometry;
+  private cachedBoostPadGeo: THREE.PlaneGeometry;
+  private cachedJumpChevronsGeo: THREE.BufferGeometry;
+  private sharedGeometries: Set<THREE.BufferGeometry>;
+
+  constructor(
+    scene: THREE.Scene,
+    initialSeed = 1337,
+    trackMode: TrackMode = 'FLOW'
+  ) {
     this.scene = scene;
     this.matchSeed = initialSeed;
+    this.trackMode = trackMode;
+    this.strictCollisions = trackMode === 'COMPETITIVE';
 
-    this.deckMaterial = new THREE.MeshStandardMaterial({
-      color: 0x060a18,
-      roughness: 0.25,
-      metalness: 0.8,
-      emissive: 0x020612,
-      emissiveIntensity: 0.5,
+    // 1. Sleek Cyber Highway Road Deck (with bright cyan racing runners & chevrons)
+    this.deckMaterial = createCyberDeckMaterial(new THREE.Color(0x00f3ff), {
+      gridSpacing: new THREE.Vector2(100.0, 75.0),
+      lineWidth: 1.5,
+      glowIntensity: 0.55,
+      roughness: 0.68,
+      metalness: 0.22,
+      useDeckTextures: true,
     });
 
-    this.platformMaterial = new THREE.MeshStandardMaterial({
-      color: 0x09162e,
-      roughness: 0.2,
-      metalness: 0.85,
-      emissive: 0x00a8ff,
-      emissiveIntensity: 0.45,
+    this.skyDeckMaterial = createCyberDeckMaterial(new THREE.Color(0x00ff66), {
+      gridSpacing: new THREE.Vector2(65.0, 65.0),
+      lineWidth: 1.6,
+      glowIntensity: 0.50,
+      roughness: 0.55,
+      metalness: 0.30,
+    });
+
+    this.hexIslandMaterial = createCyberDeckMaterial(new THREE.Color(0xff007f), {
+      gridSpacing: new THREE.Vector2(50.0, 50.0),
+      lineWidth: 1.8,
+      glowIntensity: 0.60,
+      roughness: 0.52,
+      metalness: 0.32,
+    });
+
+    // 2. High-Contrast Obstacle Pillar Material (bold industrial amber/black hazard stripes)
+    const pillarTex = getObstaclePillarTexture();
+    this.pillarMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.45,
+      metalness: 0.38,
+      emissive: 0xffaa00,
+      emissiveIntensity: 0.22,
+    });
+    if (pillarTex) {
+      this.pillarMaterial.map = pillarTex;
+    }
+
+    // 3. Lethal Moving Frogger Beam Material (neon-magenta/black hazard stripes with laser core)
+    const froggerTex = getFroggerHazardTexture();
+    this.froggerMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.40,
+      metalness: 0.35,
+      emissive: 0xff0066,
+      emissiveIntensity: 0.55,
+    });
+    if (froggerTex) {
+      this.froggerMaterial.map = froggerTex;
+    }
+
+    // 4. Surf Ramp & Launch Wave Material (cobalt blue metal with glowing spring-green launch chevrons)
+    const rampTex = getRampTextures();
+    this.surfWaveMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.48,
+      metalness: 0.42,
+      emissive: 0x00ffaa,
+      emissiveIntensity: 0.30,
+    });
+    if (rampTex) {
+      this.surfWaveMaterial.map = rampTex.map;
+      this.surfWaveMaterial.roughnessMap = rampTex.roughnessMap;
+    }
+
+    // 5. Heavy Hazard Footing Material
+    this.hazardMaterial = this.pillarMaterial;
+
+    // 6. Curbs & Edge Parapets
+    this.curbMaterial = new THREE.MeshStandardMaterial({
+      color: 0x121b2d,
+      roughness: 0.55,
+      metalness: 0.35,
+      emissive: 0x00f3ff,
+      emissiveIntensity: 0.28,
+    });
+
+    this.parapetMaterial = new THREE.MeshStandardMaterial({
+      color: 0x161c2e,
+      roughness: 0.50,
+      metalness: 0.38,
+      emissive: 0xff007f,
+      emissiveIntensity: 0.32,
+    });
+
+    this.thrusterConeMaterial = new THREE.MeshBasicMaterial({
+      color: 0x00f3ff,
+      transparent: true,
+      opacity: 0.85,
     });
 
     this.cyanLineMaterial = new THREE.LineBasicMaterial({
@@ -130,37 +262,28 @@ export class TrackGenerator implements CollisionWorld {
       opacity: 0.95,
     });
 
-    this.pillarMaterial = new THREE.MeshStandardMaterial({
-      color: 0x0a1026,
-      emissive: 0x00f3ff,
-      emissiveIntensity: 0.75,
-      roughness: 0.2,
-      metalness: 0.9,
-    });
-
-    this.froggerMaterial = new THREE.MeshStandardMaterial({
-      color: 0x220018,
-      emissive: 0xff007f,
-      emissiveIntensity: 1.15,
-      roughness: 0.2,
-      metalness: 0.8,
-    });
-
     this.laserMaterial = new THREE.MeshBasicMaterial({
       color: 0xff1e56,
     });
 
     this.bridgeMaterial = new THREE.MeshStandardMaterial({
-      color: 0x052415,
+      color: 0x0a2216,
       emissive: 0x00ff66,
-      emissiveIntensity: 0.75,
-      roughness: 0.3,
+      emissiveIntensity: 0.32,
+      roughness: 0.55,
+      metalness: 0.32,
     });
+    if (rampTex) {
+      this.bridgeMaterial.map = rampTex.map;
+      this.bridgeMaterial.roughnessMap = rampTex.roughnessMap;
+    }
+
+    this.lightCapMat = new THREE.MeshBasicMaterial({ color: 0x00f3ff });
 
     this.boostPadMaterial = new THREE.MeshBasicMaterial({
       color: 0x00ff66,
       transparent: true,
-      opacity: 0.75,
+      opacity: 0.85,
       side: THREE.DoubleSide,
     });
 
@@ -170,10 +293,313 @@ export class TrackGenerator implements CollisionWorld {
       opacity: 0.55,
     });
 
+    // 2. Pre-build and cache all beveled ExtrudeGeometry & BufferGeometry shapes once
+    const W = TrackGenerator.HIGHWAY_WIDTH;
+    const L = TrackGenerator.CHUNK_LENGTH;
+
+    this.cachedDeckGeo = new THREE.BoxGeometry(W, 16, L);
+    this.cachedDeckHalfGeo = new THREE.BoxGeometry(W, 16, 420);
+    this.cachedBridgeGeo = new THREE.BoxGeometry(155, 12, 430);
+
+    // Supplementary Outer 45° Surf Curbs on outer perimeter (x = -600..-515 and x = +515..+600, y = 0..85)
+    // Leaves 1,030 units of wide-open central bhop highway
+    const curbLeftShape = new THREE.Shape();
+    curbLeftShape.moveTo(-600, -16);
+    curbLeftShape.lineTo(-515, -16);
+    curbLeftShape.lineTo(-515, 0);
+    curbLeftShape.lineTo(-600, 85);
+    curbLeftShape.closePath();
+    this.cachedCurbLeftGeo = new THREE.ExtrudeGeometry(curbLeftShape, {
+      depth: L,
+      bevelEnabled: true,
+      bevelSegments: 1,
+      steps: 1,
+      bevelSize: 2,
+      bevelThickness: 2,
+    });
+
+    const curbRightShape = new THREE.Shape();
+    curbRightShape.moveTo(515, -16);
+    curbRightShape.lineTo(600, -16);
+    curbRightShape.lineTo(600, 85);
+    curbRightShape.lineTo(515, 0);
+    curbRightShape.closePath();
+    this.cachedCurbRightGeo = new THREE.ExtrudeGeometry(curbRightShape, {
+      depth: L,
+      bevelEnabled: true,
+      bevelSegments: 1,
+      steps: 1,
+      bevelSize: 2,
+      bevelThickness: 2,
+    });
+
+    const curbLinePts: number[] = [
+      -600, 85.5, 0, -600, 85.5, L,
+      -515, 1.2, 0, -515, 1.2, L,
+      600, 85.5, 0, 600, 85.5, L,
+      515, 1.2, 0, 515, 1.2, L,
+    ];
+    this.cachedCurbLinesGeo = new THREE.BufferGeometry();
+    this.cachedCurbLinesGeo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(curbLinePts, 3)
+    );
+
+    // 3D Cyber Runway Light Pylons along outer curbs
+    this.cachedPylonGeo = new THREE.BoxGeometry(10, 48, 10);
+    this.cachedLightCapGeo = new THREE.BoxGeometry(14, 8, 14);
+
+    // 30° Flank Wedge (length 96u, height 34u, width 140u)
+    const wedge30Shape = new THREE.Shape();
+    wedge30Shape.moveTo(0, 0);
+    wedge30Shape.lineTo(0, -10);
+    wedge30Shape.lineTo(96, -10);
+    wedge30Shape.lineTo(96, 34);
+    wedge30Shape.closePath();
+    this.cachedLaunchWedge30Geo = new THREE.ExtrudeGeometry(wedge30Shape, {
+      depth: 140,
+      bevelEnabled: true,
+      bevelSegments: 2,
+      steps: 1,
+      bevelSize: 2,
+      bevelThickness: 2,
+    });
+    this.cachedLaunchWedge30Geo.rotateY(Math.PI * 0.5);
+    this.cachedLaunchWedge30Geo.center();
+
+    // Sleek 45° Flank Surf Wave (length: 520u, height: 64u, base width: 128u)
+    const prismHalfW = 64;
+    const prismHeight = 64;
+    const prismShape = new THREE.Shape();
+    prismShape.moveTo(-prismHalfW, 0);
+    prismShape.lineTo(prismHalfW, 0);
+    prismShape.lineTo(0, prismHeight);
+    prismShape.closePath();
+    this.cachedCanyonPrism50Geo = new THREE.ExtrudeGeometry(prismShape, {
+      depth: 520,
+      bevelEnabled: true,
+      bevelSegments: 2,
+      steps: 1,
+      bevelSize: 2.5,
+      bevelThickness: 2.5,
+    });
+    this.cachedCanyonPrism50Geo.translate(0, 0, -260);
+
+    // Sweeping Elevated Flank Sky-Highway Deck for SPLIT_ELEVATION (width: 230u, length: 920u)
+    const splitDeckShape = new THREE.Shape();
+    const sHw = 115;
+    const sHl = 460;
+    const sBevel = 16;
+    splitDeckShape.moveTo(-sHw + sBevel, -sHl);
+    splitDeckShape.lineTo(sHw - sBevel, -sHl);
+    splitDeckShape.lineTo(sHw, -sHl + sBevel);
+    splitDeckShape.lineTo(sHw, sHl - sBevel);
+    splitDeckShape.lineTo(sHw - sBevel, sHl);
+    splitDeckShape.lineTo(-sHw + sBevel, sHl);
+    splitDeckShape.lineTo(-sHw, sHl - sBevel);
+    splitDeckShape.lineTo(-sHw, -sHl + sBevel);
+    splitDeckShape.closePath();
+    this.cachedSplitSkyHighwayGeo = new THREE.ExtrudeGeometry(splitDeckShape, {
+      depth: 12,
+      bevelEnabled: true,
+      bevelSegments: 1,
+      steps: 1,
+      bevelSize: 3,
+      bevelThickness: 3,
+    });
+    this.cachedSplitSkyHighwayGeo.rotateX(-Math.PI * 0.5);
+
+    // Beveled Parapet Wall along elevated sky-highways
+    const parapetShape = new THREE.Shape();
+    parapetShape.moveTo(-5, 0);
+    parapetShape.lineTo(5, 0);
+    parapetShape.lineTo(3, 10);
+    parapetShape.lineTo(-3, 10);
+    parapetShape.closePath();
+    this.cachedParapetWallGeo = new THREE.ExtrudeGeometry(parapetShape, {
+      depth: 880,
+      bevelEnabled: true,
+      bevelSegments: 1,
+      steps: 1,
+      bevelSize: 1.5,
+      bevelThickness: 1.5,
+    });
+    this.cachedParapetWallGeo.translate(0, 0, -440);
+
+    // Downward-Glowing Ion Thruster Cone underneath elevated decks
+    this.cachedThrusterConeGeo = new THREE.ConeGeometry(24, 30, 8);
+    this.cachedThrusterConeGeo.rotateX(Math.PI); // Point downward
+
+    // Flush Low-Profile Bhop Flow Pad for HALFPIPE_CARVE (width: 220u, length: 320u, height: 14u)
+    // Fits within sv_stepsize = 20 so players never get blocked if they run or bhop across it
+    const diamondShape = new THREE.Shape();
+    diamondShape.moveTo(0, -160);
+    diamondShape.lineTo(110, 0);
+    diamondShape.lineTo(0, 160);
+    diamondShape.lineTo(-110, 0);
+    diamondShape.closePath();
+    this.cachedDiamondIslandGeo = new THREE.ExtrudeGeometry(diamondShape, {
+      depth: 10,
+      bevelEnabled: true,
+      bevelSegments: 2,
+      steps: 1,
+      bevelSize: 8,
+      bevelThickness: 4,
+    });
+    this.cachedDiamondIslandGeo.rotateX(-Math.PI * 0.5);
+
+    // Wide Beveled Hexagonal Bhop Island for SKY_ARCHIPELAGO (260u wide × 300u long -> rx = 130, rz = 150)
+    const hexShape = new THREE.Shape();
+    const rx = 130;
+    const rz = 150;
+    for (let i = 0; i < 6; i++) {
+      const angle = (i * Math.PI) / 3 + Math.PI / 6;
+      const px = Math.cos(angle) * rx;
+      const py = Math.sin(angle) * rz;
+      if (i === 0) hexShape.moveTo(px, py);
+      else hexShape.lineTo(px, py);
+    }
+    hexShape.closePath();
+    this.cachedHexLilyPadGeo = new THREE.ExtrudeGeometry(hexShape, {
+      depth: 18,
+      bevelEnabled: true,
+      bevelSegments: 2,
+      steps: 1,
+      bevelSize: 6,
+      bevelThickness: 6,
+    });
+    this.cachedHexLilyPadGeo.rotateX(-Math.PI * 0.5);
+
+    // Parallel 950-unit Neon Surf Rail for SKY_ARCHIPELAGO (48° triangular surf rail)
+    const railShape = new THREE.Shape();
+    railShape.moveTo(-55, 0);
+    railShape.lineTo(55, 0);
+    railShape.lineTo(0, 62);
+    railShape.closePath();
+    this.cachedSurfRail950Geo = new THREE.ExtrudeGeometry(railShape, {
+      depth: 950,
+      bevelEnabled: true,
+      bevelSegments: 1,
+      steps: 1,
+      bevelSize: 2,
+      bevelThickness: 2,
+    });
+    this.cachedSurfRail950Geo.translate(0, 0, -475);
+
+    // Central Safety Catwalk / Sky-Rail (width: 110u, length: 980u)
+    const catwalkShape = new THREE.Shape();
+    catwalkShape.moveTo(-55, -490);
+    catwalkShape.lineTo(55, -490);
+    catwalkShape.lineTo(55, 490);
+    catwalkShape.lineTo(-55, 490);
+    catwalkShape.closePath();
+    this.cachedCatwalkGeo = new THREE.ExtrudeGeometry(catwalkShape, {
+      depth: 12,
+      bevelEnabled: true,
+      bevelSegments: 1,
+      steps: 1,
+      bevelSize: 3,
+      bevelThickness: 3,
+    });
+    this.cachedCatwalkGeo.rotateX(-Math.PI * 0.5);
+
+    // High Sky-Bridge Platform (width: 180u, length: 540u)
+    const skyBridgeShape = new THREE.Shape();
+    const bHx = 90;
+    const bHz = 270;
+    const bCorner = 16;
+    skyBridgeShape.moveTo(-bHx + bCorner, -bHz);
+    skyBridgeShape.lineTo(bHx - bCorner, -bHz);
+    skyBridgeShape.lineTo(bHx, -bHz + bCorner);
+    skyBridgeShape.lineTo(bHx, bHz - bCorner);
+    skyBridgeShape.lineTo(bHx - bCorner, bHz);
+    skyBridgeShape.lineTo(-bHx + bCorner, bHz);
+    skyBridgeShape.lineTo(-bHx, bHz - bCorner);
+    skyBridgeShape.lineTo(-bHx, -bHz + bCorner);
+    skyBridgeShape.closePath();
+    this.cachedSkyBridgeGeo = new THREE.ExtrudeGeometry(skyBridgeShape, {
+      depth: 14,
+      bevelEnabled: true,
+      bevelSegments: 1,
+      steps: 1,
+      bevelSize: 4,
+      bevelThickness: 4,
+    });
+    this.cachedSkyBridgeGeo.rotateX(-Math.PI * 0.5);
+
+    // Floating Holographic Chevron Arch above Boost Pads
+    const chevronArchShape = new THREE.Shape();
+    chevronArchShape.moveTo(-52, 8);
+    chevronArchShape.lineTo(0, 34);
+    chevronArchShape.lineTo(52, 8);
+    chevronArchShape.lineTo(44, 2);
+    chevronArchShape.lineTo(0, 24);
+    chevronArchShape.lineTo(-44, 2);
+    chevronArchShape.closePath();
+    this.cachedHoloChevronArchGeo = new THREE.ExtrudeGeometry(chevronArchShape, {
+      depth: 3,
+      bevelEnabled: true,
+      bevelSegments: 1,
+      steps: 1,
+      bevelSize: 1,
+      bevelThickness: 1,
+    });
+
+    // Boost Pad Quad & Guide Chevrons
+    this.cachedBoostPadGeo = new THREE.PlaneGeometry(1, 1);
+    this.cachedBoostPadGeo.rotateX(-Math.PI * 0.5);
+
+    const chevPts: number[] = [];
+    for (let x = -450; x <= 450; x += 150) {
+      chevPts.push(x - 45, 1.5, 35, x, 1.5, 0);
+      chevPts.push(x, 1.5, 0, x + 45, 1.5, 35);
+    }
+    this.cachedJumpChevronsGeo = new THREE.BufferGeometry();
+    this.cachedJumpChevronsGeo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(chevPts, 3)
+    );
+
+    this.sharedGeometries = new Set<THREE.BufferGeometry>([
+      this.cachedDeckGeo,
+      this.cachedDeckHalfGeo,
+      this.cachedBridgeGeo,
+      this.cachedCurbLeftGeo,
+      this.cachedCurbRightGeo,
+      this.cachedCurbLinesGeo,
+      this.cachedLaunchWedge30Geo,
+      this.cachedCanyonPrism50Geo,
+      this.cachedSplitSkyHighwayGeo,
+      this.cachedParapetWallGeo,
+      this.cachedThrusterConeGeo,
+      this.cachedDiamondIslandGeo,
+      this.cachedHexLilyPadGeo,
+      this.cachedSurfRail950Geo,
+      this.cachedCatwalkGeo,
+      this.cachedSkyBridgeGeo,
+      this.cachedHoloChevronArchGeo,
+      this.cachedBoostPadGeo,
+      this.cachedJumpChevronsGeo,
+      this.cachedPylonGeo,
+      this.cachedLightCapGeo,
+    ]);
+
     this.wallMesh = this.createDerezzingWallMesh();
     this.scene.add(this.wallMesh);
 
     this.resetWithSeed(initialSeed);
+  }
+
+  public setTrackMode(mode: TrackMode): void {
+    if (this.trackMode !== mode) {
+      this.trackMode = mode;
+      this.strictCollisions = mode === 'COMPETITIVE';
+      this.resetWithSeed(this.matchSeed);
+    }
+  }
+
+  public setStrictCollisions(enabled: boolean): void {
+    this.strictCollisions = enabled;
   }
 
   private createDerezzingWallMesh(): THREE.Group {
@@ -204,7 +630,6 @@ export class TrackGenerator implements CollisionWorld {
     wire.position.y = 250;
     group.add(wire);
 
-    // Bottom blazing hazard beam
     const coreGeo = new THREE.BoxGeometry(
       TrackGenerator.HIGHWAY_WIDTH * 1.8,
       16,
@@ -257,6 +682,9 @@ export class TrackGenerator implements CollisionWorld {
     return new SeededRandom(combinedSeed);
   }
 
+  /**
+   * Retains 3 chunks behind (3600 units) and spawns 6 chunks ahead
+   */
   public updateAroundPlayerZ(
     playerZ: number,
     matchElapsedSec: number,
@@ -265,8 +693,8 @@ export class TrackGenerator implements CollisionWorld {
     const L = TrackGenerator.CHUNK_LENGTH;
     const currentChunkIdx = Math.floor(-playerZ / L);
 
-    // Spawn from 1 chunk behind to 6 chunks ahead
-    for (let idx = currentChunkIdx - 1; idx <= currentChunkIdx + 6; idx++) {
+    // Spawn from 3 chunks behind to 6 chunks ahead
+    for (let idx = currentChunkIdx - 3; idx <= currentChunkIdx + 6; idx++) {
       if (!this.chunks.has(idx)) {
         const chunk = this.buildChunk(idx, matchElapsedSec);
         this.chunks.set(idx, chunk);
@@ -275,9 +703,9 @@ export class TrackGenerator implements CollisionWorld {
       }
     }
 
-    // Despawn chunks more than 2 chunks behind player
+    // Despawn chunks more than 3 chunks behind player (3600 units trailing retention)
     for (const [idx, chunk] of this.chunks.entries()) {
-      if (idx < currentChunkIdx - 2) {
+      if (idx < currentChunkIdx - 3) {
         this.disposeChunk(chunk);
         this.chunks.delete(idx);
         this.totalDespawnedChunks++;
@@ -295,10 +723,7 @@ export class TrackGenerator implements CollisionWorld {
       }
     }
 
-    // Advance the chasing Derezzing Wall with a fair 5s warmup grace period:
-    // - 0..5s: gentle 140 UPS warmup so player can orient and start moving
-    // - 5..25s: ramps from 180 -> 300 UPS
-    // - 25..150s: scales from 300 -> 520 UPS
+    // Advance the chasing Derezzing Wall
     if (this.wallEnabled && !this.flatTestMode && dt > 0) {
       if (matchElapsedSec < 5) {
         this.wallSpeedUps = 140 + (matchElapsedSec / 5) * 40;
@@ -312,7 +737,6 @@ export class TrackGenerator implements CollisionWorld {
 
       this.wallZ -= this.wallSpeedUps * dt;
 
-      // Rubber-band cap so the wall stays within 2000 units behind if player rockets far ahead
       const maxLagDistance = 2000;
       if (this.wallZ > playerZ + maxLagDistance) {
         this.wallZ = playerZ + maxLagDistance;
@@ -328,19 +752,35 @@ export class TrackGenerator implements CollisionWorld {
     const zEnd = -(index + 1) * L;
     const rng = this.getChunkRng(index);
 
-    // Chunk <= 0 is always a clean launch runway with starter boost pads and guide arrows
     let archetype: ChunkArchetype = 'RUNWAY';
     if (!this.flatTestMode && index >= 1) {
-      const pool: ChunkArchetype[] = [
-        'SLALOM',
-        'FROGGER',
-        'KZ_CHASM',
-        'LASER_HURDLES',
-      ];
-      if (index <= 4) {
-        archetype = pool[(index - 1) % pool.length];
+      if (this.trackMode === 'FLOW') {
+        const flowPool: ChunkArchetype[] = [
+          'RUNWAY',
+          'CANYON_WAVE',
+          'SPLIT_ELEVATION',
+          'HALFPIPE_CARVE',
+          'SKY_ARCHIPELAGO',
+        ];
+        if (index <= 4) {
+          archetype = flowPool[index]; // Deterministically cycles CANYON_WAVE, SPLIT_ELEVATION, HALFPIPE_CARVE, SKY_ARCHIPELAGO
+        } else {
+          archetype = flowPool[index % flowPool.length];
+          // Consume rng once to maintain deterministic stream
+          rng.next();
+        }
       } else {
-        archetype = rng.pick(pool);
+        const compPool: ChunkArchetype[] = [
+          'SLALOM',
+          'FROGGER',
+          'KZ_CHASM',
+          'LASER_HURDLES',
+        ];
+        if (index <= 4) {
+          archetype = compPool[(index - 1) % compPool.length];
+        } else {
+          archetype = rng.pick(compPool);
+        }
       }
     }
 
@@ -348,35 +788,35 @@ export class TrackGenerator implements CollisionWorld {
     const obstacles: ObstacleBox[] = [];
     const boostPads: BoostPad[] = [];
     const chasms: ChasmGap[] = [];
+    const surfRamps: SurfRampCollider[] = [];
 
+    // 1. Continuous Outer 45° Half-Pipe Surf Curbs on EVERY Chunk
+    if (!this.flatTestMode) {
+      this.addContinuousOuterSurfCurbs(group, surfRamps, zStart, zEnd);
+    }
+
+    // 2. Deck Floor & Chasm Setup
     if (archetype === 'KZ_CHASM') {
-      // Split deck with a 390-unit KZ Long-Jump chasm in the middle
       const gapLength = rng.range(380, 415);
       const zMid = (zStart + zEnd) * 0.5;
       const gapStart = zMid + gapLength * 0.5;
       const gapEnd = zMid - gapLength * 0.5;
-
       const entryLen = zStart - gapStart;
 
-      this.addDeckSegment(group, zStart, zStart - entryLen, W, index);
-      this.addDeckSegment(group, gapEnd, zEnd, W, index);
+      this.addDeckBox(group, zStart, zStart - entryLen);
+      this.addDeckBox(group, gapEnd, zEnd);
 
-      // Slower fallback bridge on BOTH outer lanes so players on either side have a clear visual route,
-      // while the center chasm rewards high-speed 450+ UPS bhop jumps or a central boost pad!
       const bridgeWidth = 155;
       for (const sideSign of [-1, 1]) {
         const bridgeCenterX = sideSign * (W * 0.5 - bridgeWidth * 0.5);
-        const bridgeGeo = new THREE.BoxGeometry(
-          bridgeWidth,
-          12,
-          gapLength + 16
+        const bridgeMesh = new THREE.Mesh(
+          this.cachedBridgeGeo,
+          this.bridgeMaterial
         );
-        const bridgeMesh = new THREE.Mesh(bridgeGeo, this.bridgeMaterial);
         bridgeMesh.position.set(bridgeCenterX, -6, zMid);
         group.add(bridgeMesh);
       }
 
-      // Add a launch boost pad right before the center of the chasm to reward aggressive center lines
       this.addBoostPad(group, boostPads, 0, gapStart + 65, 95, 75, 110, 85);
       this.addNeonJumpChevron(group, gapStart - 10);
 
@@ -387,172 +827,90 @@ export class TrackGenerator implements CollisionWorld {
         bridgeMaxX: -W * 0.5 + bridgeWidth,
       });
     } else {
-      // Continuous highway deck for this chunk
-      this.addDeckSegment(group, zStart, zEnd, W, index);
+      this.addDeckBox(group, zStart, zEnd);
     }
 
-    // Add Overhead Speed Reference Portals & Roadside Cyber-Skyline Towers to every chunk
-    if (!this.flatTestMode && index >= 0) {
-      this.addSpeedArchesAndSkyline(group, zStart, zEnd, W, index, rng);
-    }
-
-    // Starter Runway Boost Pads & Intuitive Forward Guide Chevrons on Chunk 0
-    if (!this.flatTestMode && index === 0) {
-      this.addNeonJumpChevron(group, -70);
-      this.addNeonJumpChevron(group, -240);
-      this.addNeonJumpChevron(group, -440);
-      this.addBoostPad(group, boostPads, 0, -140, 120, 90, 95, 0);
-      this.addBoostPad(group, boostPads, 0, -680, 110, 90, 85, 65);
-    }
-
-    // Populate archetype obstacles & multi-tier parkour platforms
-    if (archetype === 'SLALOM') {
-      // Bhop Pillar Slaloms + Elevated Center Sky-Walk Platform
-      const rows = 3;
-      for (let r = 0; r < rows; r++) {
-        const rowZ = zStart - 220 - r * 360;
-        const offsetSign = r % 2 === 0 ? -1 : 1;
-        const pillarPositionsX = offsetSign < 0 ? [-220, 260] : [-260, 220];
-
-        for (const px of pillarPositionsX) {
-          const hx = 54;
-          const hy = 95;
-          const hz = 54;
-          const mesh = this.createNeonBoxMesh(
-            hx * 2,
-            hy * 2,
-            hz * 2,
-            this.pillarMaterial,
-            0x00f3ff
-          );
-          mesh.position.set(px, hy, rowZ);
-          group.add(mesh);
-
-          obstacles.push({
-            id: `slalom_${index}_${r}_${px}`,
-            kind: 'pillar',
-            x: px,
-            y: hy,
-            z: rowZ,
-            hx,
-            hy,
-            hz,
-            lethal: false,
-            mesh,
-          });
-        }
-      }
-
-      // Add an elevated parkour sky-platform along the side lane
-      this.addElevatedPlatform(
-        group,
-        obstacles,
-        boostPads,
-        index,
-        rng.next() < 0.5 ? -390 : 390,
-        36,
-        (zStart + zEnd) * 0.5,
-        85,
-        380
-      );
-    } else if (archetype === 'FROGGER') {
-      // Horizontal sliding plasma blocks + Elevated Center Sky-Bridge over the beams!
-      const beamCount = 3;
-      for (let b = 0; b < beamCount; b++) {
-        const beamZ = zStart - 240 - b * 360;
-        const hx = 130;
-        const hy = 30;
-        const hz = 30;
-        const speedX = rng.range(1.5, 2.5) * (b % 2 === 0 ? 1 : -1);
-        const phase = rng.range(0, Math.PI * 2);
-        const rangeX = TrackGenerator.HIGHWAY_HALF_WIDTH - hx - 40;
-
-        const mesh = this.createNeonBoxMesh(
-          hx * 2,
-          hy * 2,
-          hz * 2,
-          this.froggerMaterial,
-          0xff007f
+    // 3. Populate Flow Playground Archetypes vs Competitive Archetypes
+    if (!this.flatTestMode) {
+      if (archetype === 'RUNWAY') {
+        this.buildFlowRunwayChunk(
+          group,
+          obstacles,
+          boostPads,
+          surfRamps,
+          index,
+          zStart,
+          zEnd
         );
-        mesh.position.set(0, hy, beamZ);
-        group.add(mesh);
-
-        obstacles.push({
-          id: `frogger_${index}_${b}`,
-          kind: 'frogger',
-          x: 0,
-          y: hy,
-          z: beamZ,
-          hx,
-          hy,
-          hz,
-          speedX,
-          phase,
-          rangeX,
-          lethal: false,
-          mesh,
-        });
-      }
-
-      // Elevated parkour overpass in the center so acrobatic runners can vault above traffic
-      this.addElevatedPlatform(
-        group,
-        obstacles,
-        boostPads,
-        index,
-        0,
-        66,
-        (zStart + zEnd) * 0.5,
-        90,
-        460
-      );
-    } else if (archetype === 'LASER_HURDLES') {
-      // Low/High horizontal laser hurdles + stepped acrobat platforms
-      const hurdleCount = 3;
-      for (let h = 0; h < hurdleCount; h++) {
-        const hurdleZ = zStart - 250 - h * 350;
-        const isHigh = h === 1;
-        const spanWidth = 720;
-        const laneOffset = (h % 2 === 0 ? -1 : 1) * 140;
-        const yCenter = isHigh ? 68 : 22;
-        const hy = 9;
-        const hx = spanWidth * 0.5;
-        const hz = 12;
-
-        const mesh = this.createNeonBoxMesh(
-          hx * 2,
-          hy * 2,
-          hz * 2,
-          this.laserMaterial,
-          0xff0055
+      } else if (archetype === 'CANYON_WAVE') {
+        this.buildCanyonWaveChunk(
+          group,
+          obstacles,
+          boostPads,
+          surfRamps,
+          index,
+          zStart,
+          zEnd
         );
-        mesh.position.set(laneOffset, yCenter, hurdleZ);
-        group.add(mesh);
-
-        obstacles.push({
-          id: `laser_${index}_${h}`,
-          kind: 'laser',
-          x: laneOffset,
-          y: yCenter,
-          z: hurdleZ,
-          hx,
-          hy,
-          hz,
-          lethal: false,
-          mesh,
-        });
+      } else if (archetype === 'SPLIT_ELEVATION') {
+        this.buildSplitElevationChunk(
+          group,
+          obstacles,
+          boostPads,
+          surfRamps,
+          index,
+          zStart,
+          zEnd
+        );
+      } else if (archetype === 'HALFPIPE_CARVE') {
+        this.buildHalfpipeCarveChunk(
+          group,
+          obstacles,
+          boostPads,
+          surfRamps,
+          index,
+          zStart,
+          zEnd
+        );
+      } else if (archetype === 'SKY_ARCHIPELAGO') {
+        this.buildSkyArchipelagoChunk(
+          group,
+          obstacles,
+          boostPads,
+          surfRamps,
+          index,
+          zStart,
+          zEnd
+        );
+      } else if (archetype === 'SLALOM') {
+        this.buildCompetitiveSlalomChunk(
+          group,
+          obstacles,
+          boostPads,
+          index,
+          zStart,
+          zEnd,
+          rng
+        );
+      } else if (archetype === 'FROGGER') {
+        this.buildCompetitiveFroggerChunk(
+          group,
+          obstacles,
+          boostPads,
+          index,
+          zStart,
+          zEnd,
+          rng
+        );
+      } else if (archetype === 'LASER_HURDLES') {
+        this.buildCompetitiveLaserHurdlesChunk(
+          group,
+          obstacles,
+          boostPads,
+          index,
+          zStart
+        );
       }
-
-      this.addBoostPad(
-        group,
-        boostPads,
-        0,
-        zStart - 110,
-        90,
-        75,
-        85,
-        90
-      );
     }
 
     return {
@@ -564,7 +922,745 @@ export class TrackGenerator implements CollisionWorld {
       obstacles,
       boostPads,
       chasms,
+      surfRamps,
     };
+  }
+
+  /**
+   * Supplementary Outer 45° Surf Curbs (x = -600..-515 and x = +515..+600, y = 0..85)
+   * Keeps 1,030 units of wide-open bhop highway while providing edge surf banks when strafing wide.
+   */
+  private addContinuousOuterSurfCurbs(
+    group: THREE.Group,
+    surfRamps: SurfRampCollider[],
+    zStart: number,
+    zEnd: number
+  ): void {
+    const minZ = Math.min(zStart, zEnd);
+    const maxZ = Math.max(zStart, zEnd);
+
+    const curbLeft = new THREE.Mesh(this.cachedCurbLeftGeo, this.curbMaterial);
+    curbLeft.position.set(0, 0, minZ);
+    group.add(curbLeft);
+
+    const curbRight = new THREE.Mesh(
+      this.cachedCurbRightGeo,
+      this.curbMaterial
+    );
+    curbRight.position.set(0, 0, minZ);
+    group.add(curbRight);
+
+    const curbLines = new THREE.LineSegments(
+      this.cachedCurbLinesGeo,
+      this.cyanLineMaterial
+    );
+    curbLines.position.set(0, 0, minZ);
+    group.add(curbLines);
+
+    // 3D Cyber Runway Light Pylons every 300 units along outer highway curbs for thrilling speed depth
+    for (let z = minZ + 150; z < maxZ; z += 300) {
+      const pLeft = new THREE.Mesh(this.cachedPylonGeo, this.parapetMaterial);
+      pLeft.position.set(-580, 24, z);
+      group.add(pLeft);
+
+      const capLeft = new THREE.Mesh(this.cachedLightCapGeo, this.lightCapMat);
+      capLeft.position.set(-580, 50, z);
+      group.add(capLeft);
+
+      const pRight = new THREE.Mesh(this.cachedPylonGeo, this.parapetMaterial);
+      pRight.position.set(580, 24, z);
+      group.add(pRight);
+
+      const capRight = new THREE.Mesh(this.cachedLightCapGeo, this.lightCapMat);
+      capRight.position.set(580, 50, z);
+      group.add(capRight);
+    }
+
+    // Left bank: normal = { x: 0.7071, y: 0.7071, z: 0 }, minX: -600, maxX: -515, minY: 0, maxY: 85
+    surfRamps.push({
+      minX: -600,
+      maxX: -515,
+      minY: 0,
+      maxY: 85,
+      minZ,
+      maxZ,
+      normal: { x: 0.7071, y: 0.7071, z: 0 },
+      planeConstant: -515 * 0.7071,
+      forwardBoost: 40,
+    });
+
+    // Right bank: normal = { x: -0.7071, y: 0.7071, z: 0 }, minX: 515, maxX: 600, minY: 0, maxY: 85
+    surfRamps.push({
+      minX: 515,
+      maxX: 600,
+      minY: 0,
+      maxY: 85,
+      minZ,
+      maxZ,
+      normal: { x: -0.7071, y: 0.7071, z: 0 },
+      planeConstant: -515 * 0.7071,
+      forwardBoost: 40,
+    });
+  }
+
+  /**
+   * 1. RUNWAY (Open Bhop Speed Boulevard):
+   * Wide-open obsidian bhop highway with zero center-lane blockers.
+   * Features a natural S-curve sequence of Recessed Turbine Boost Pads (liftY = 0 so grounded bhop timing is untouched)
+   * and an optional high flank sky-bridge on the outer right lane.
+   */
+  private buildFlowRunwayChunk(
+    group: THREE.Group,
+    obstacles: ObstacleBox[],
+    boostPads: BoostPad[],
+    _surfRamps: SurfRampCollider[],
+    index: number,
+    zStart: number,
+    zEnd: number
+  ): void {
+    const zMid = (zStart + zEnd) * 0.5;
+
+    // Single centered runway acceleration boost pad
+    this.addRecessedTurbinePad(
+      group,
+      boostPads,
+      0,
+      zStart - 500,
+      95,
+      75,
+      280,
+      85
+    );
+
+    // Optional Flank Sky-Bridge tucked out at x = +380, y = 34 (leaves 760u of center/left completely open)
+    const bridgeX = 380;
+    const bridgeZ = zMid - 60;
+    const skyBridgeMesh = new THREE.Mesh(
+      this.cachedSkyBridgeGeo,
+      this.skyDeckMaterial
+    );
+    skyBridgeMesh.position.set(bridgeX, 34, bridgeZ);
+    group.add(skyBridgeMesh);
+
+    obstacles.push({
+      id: `runway_skybridge_${index}`,
+      kind: 'platform',
+      x: bridgeX,
+      y: 27,
+      z: bridgeZ,
+      hx: 90,
+      hy: 7,
+      hz: 270,
+      lethal: false,
+      mesh: skyBridgeMesh,
+    });
+
+    this.addRecessedTurbinePad(
+      group,
+      boostPads,
+      bridgeX,
+      bridgeZ,
+      65,
+      55,
+      90,
+      0,
+      34
+    );
+  }
+
+  /**
+   * 2. CANYON_WAVE (Wide Bhop Boulevard + Supplementary Flank Surf Waves):
+   * Keeps a massive 680-unit-wide central bhop spine (-340..+340) 100% open for S-curve air-strafing,
+   * while placing two sleek 45° supplementary surf waves out on the left and right flanks (x = ±415).
+   */
+  private buildCanyonWaveChunk(
+    group: THREE.Group,
+    obstacles: ObstacleBox[],
+    boostPads: BoostPad[],
+    surfRamps: SurfRampCollider[],
+    index: number,
+    zStart: number,
+    zEnd: number
+  ): void {
+    const zMid = (zStart + zEnd) * 0.5;
+    const invSqrt2 = 0.70710678;
+
+    // Left flank 45° supplementary surf wave (centered at x = -415, z = zStart - 340, halfW = 64, height = 64)
+    const leftX = -415;
+    const leftZ = zStart - 340;
+    const leftPrism = new THREE.Mesh(
+      this.cachedCanyonPrism50Geo,
+      this.surfWaveMaterial
+    );
+    leftPrism.position.set(leftX, 0, leftZ);
+    group.add(leftPrism);
+
+    // Left wave inward-facing slope (x from -415 to -351, y from 64 down to 0)
+    surfRamps.push({
+      minX: leftX,
+      maxX: leftX + 68,
+      minY: 0,
+      maxY: 66,
+      minZ: leftZ - 260,
+      maxZ: leftZ + 260,
+      normal: { x: invSqrt2, y: invSqrt2, z: 0 },
+      planeConstant: (leftX + 64) * invSqrt2,
+      forwardBoost: 45,
+    });
+
+    // Right flank 45° supplementary surf wave (staggered at x = +415, z = zStart - 840, halfW = 64, height = 64)
+    const rightX = 415;
+    const rightZ = zStart - 840;
+    const rightPrism = new THREE.Mesh(
+      this.cachedCanyonPrism50Geo,
+      this.surfWaveMaterial
+    );
+    rightPrism.position.set(rightX, 0, rightZ);
+    group.add(rightPrism);
+
+    // Right wave inward-facing slope (x from 351 to 415, y from 0 up to 64)
+    surfRamps.push({
+      minX: rightX - 68,
+      maxX: rightX,
+      minY: 0,
+      maxY: 66,
+      minZ: rightZ - 260,
+      maxZ: rightZ + 260,
+      normal: { x: -invSqrt2, y: invSqrt2, z: 0 },
+      planeConstant: (rightX - 64) * -invSqrt2,
+      forwardBoost: 45,
+    });
+
+    // Single strategic boost pad at the canyon chicane exit
+    this.addRecessedTurbinePad(
+      group,
+      boostPads,
+      0,
+      zStart - 600,
+      95,
+      75,
+      280,
+      85
+    );
+
+    // Optional Flank Sky-Rail tucked out at x = +290, y = 38 (one-way platform)
+    const skyRailMesh = new THREE.Mesh(
+      this.cachedCatwalkGeo,
+      this.skyDeckMaterial
+    );
+    skyRailMesh.position.set(290, 38, zMid);
+    group.add(skyRailMesh);
+
+    obstacles.push({
+      id: `canyon_skyrail_${index}`,
+      kind: 'platform',
+      x: 290,
+      y: 32,
+      z: zMid,
+      hx: 55,
+      hy: 6,
+      hz: 490,
+      lethal: false,
+      mesh: skyRailMesh,
+    });
+  }
+
+  /**
+   * 3. SPLIT_ELEVATION (Wide Central Bhop Highway + Accessible Flank Sky-Decks):
+   * Zero ramp blockers. Two sweeping elevated sky-highways (y = 34, width = 230u each)
+   * run along the outer flanks (x = ±375) as one-way bhop decks, leaving a 520-unit-wide
+   * central flat bhop highway with sequential boost pads.
+   */
+  private buildSplitElevationChunk(
+    group: THREE.Group,
+    obstacles: ObstacleBox[],
+    boostPads: BoostPad[],
+    _surfRamps: SurfRampCollider[],
+    index: number,
+    zStart: number,
+    zEnd: number
+  ): void {
+    const zMid = (zStart + zEnd) * 0.5;
+    const flankXs = [-375, 375];
+
+    for (const fx of flankXs) {
+      // Sweeping elevated flank sky-highway (y = 34, width = 230u, length = 920u)
+      const skyHighway = new THREE.Mesh(
+        this.cachedSplitSkyHighwayGeo,
+        this.skyDeckMaterial
+      );
+      skyHighway.position.set(fx, 34, zMid - 40);
+      group.add(skyHighway);
+
+      obstacles.push({
+        id: `split_sky_${index}_${fx}`,
+        kind: 'platform',
+        x: fx,
+        y: 28,
+        z: zMid - 40,
+        hx: 115,
+        hy: 6,
+        hz: 460,
+        lethal: false,
+        mesh: skyHighway,
+      });
+
+      // Outer beveled parapet trim wall on sky-highway
+      const parapet = new THREE.Mesh(
+        this.cachedParapetWallGeo,
+        this.parapetMaterial
+      );
+      parapet.position.set(
+        fx + (fx < 0 ? -108 : 108),
+        34,
+        zMid - 40
+      );
+      group.add(parapet);
+
+      // Downward-glowing ion thruster cones underneath the sky-highway
+      for (const tz of [zMid + 260, zMid - 40, zMid - 340]) {
+        const cone = new THREE.Mesh(
+          this.cachedThrusterConeGeo,
+          this.thrusterConeMaterial
+        );
+        cone.position.set(fx, 14, tz);
+        group.add(cone);
+      }
+
+      // Single reward boost pad on the elevated flank sky-highway
+      this.addRecessedTurbinePad(
+        group,
+        boostPads,
+        fx,
+        zMid - 40,
+        80,
+        60,
+        280,
+        85,
+        34
+      );
+    }
+
+    // Single centered ground highway boost pad
+    this.addRecessedTurbinePad(
+      group,
+      boostPads,
+      0,
+      zStart - 580,
+      95,
+      75,
+      280,
+      85
+    );
+  }
+
+  /**
+   * 4. HALFPIPE_CARVE (Flush Bhop Flow Pads + Supplementary Edge Surf Rail):
+   * Places 3 ultra-low-profile (y = 14, within sv_stepsize = 20 auto-step-up) diamond bhop pads
+   * along an S-curve so players can seamlessly bhop or run across them with zero collision penalty,
+   * paired with a supplementary surf rail on the right flank (x = +430).
+   */
+  private buildHalfpipeCarveChunk(
+    group: THREE.Group,
+    obstacles: ObstacleBox[],
+    boostPads: BoostPad[],
+    surfRamps: SurfRampCollider[],
+    index: number,
+    zStart: number,
+    zEnd: number
+  ): void {
+    const zMid = (zStart + zEnd) * 0.5;
+    const islands = [
+      { x: -130, z: zStart - 250 },
+      { x: 130, z: zStart - 610 },
+      { x: -130, z: zStart - 950 },
+    ];
+
+    for (let i = 0; i < islands.length; i++) {
+      const { x: dx, z: dz } = islands[i];
+      const diamondMesh = new THREE.Mesh(
+        this.cachedDiamondIslandGeo,
+        this.hexIslandMaterial
+      );
+      diamondMesh.position.set(dx, 14, dz);
+      group.add(diamondMesh);
+
+      // Flush top deck (y = 14 <= sv_stepsize = 20) acts as a seamless step-up bhop pad
+      obstacles.push({
+        id: `diamond_island_${index}_${i}`,
+        kind: 'platform',
+        x: dx,
+        y: 7,
+        z: dz,
+        hx: 85,
+        hy: 7,
+        hz: 120,
+        lethal: false,
+        mesh: diamondMesh,
+      });
+
+      // Single apex boost pad on the center diamond island
+      if (i === 1) {
+        this.addRecessedTurbinePad(
+          group,
+          boostPads,
+          dx,
+          dz,
+          75,
+          75,
+          280,
+          85,
+          14
+        );
+      }
+    }
+
+    // Supplementary Flank Surf Rail tucked out at x = +430 (leaves center & left lanes 100% open)
+    const railX = 430;
+    const railMesh = new THREE.Mesh(
+      this.cachedSurfRail950Geo,
+      this.surfWaveMaterial
+    );
+    railMesh.position.set(railX, 0, zMid);
+    group.add(railMesh);
+
+    const railNx = 0.7431;
+    const railNy = 0.6691;
+    surfRamps.push({
+      minX: railX - 60,
+      maxX: railX,
+      minY: 0,
+      maxY: 64,
+      minZ: zMid - 475,
+      maxZ: zMid + 475,
+      normal: { x: -railNx, y: railNy, z: 0 },
+      planeConstant: (railX - 55) * -railNx,
+      forwardBoost: 45,
+    });
+  }
+
+  /**
+   * 5. SKY_ARCHIPELAGO (Open Highway + S-Curve Bhop Lily-Pads + Supplementary Flank Surf Rail):
+   * Full flat highway deck stays 100% unobstructed underneath while 6 wide hexagonal bhop pads
+   * form a gentle, optional ascending S-curve (y = 16 -> 56), with a supplementary surf rail on the far left flank.
+   */
+  private buildSkyArchipelagoChunk(
+    group: THREE.Group,
+    obstacles: ObstacleBox[],
+    boostPads: BoostPad[],
+    surfRamps: SurfRampCollider[],
+    index: number,
+    zStart: number,
+    zEnd: number
+  ): void {
+    const zMid = (zStart + zEnd) * 0.5;
+
+    // 1. Single ground-level central bhop boost pad along the open highway floor
+    this.addRecessedTurbinePad(
+      group,
+      boostPads,
+      0,
+      zStart - 600,
+      90,
+      75,
+      280,
+      85
+    );
+
+    // 2. 6 Wide Beveled Hexagonal Bhop Islands (260u wide × 300u long) in a gentle S-curve (y = 16 -> 56)
+    const lilyHeights = [16, 24, 32, 40, 48, 56];
+    const lilyXs = [-165, -235, -140, 140, 235, 165];
+
+    for (let i = 0; i < 6; i++) {
+      const topY = lilyHeights[i];
+      const lx = lilyXs[i];
+      const lz = zStart - 130 - i * 185;
+
+      const hexMesh = new THREE.Mesh(
+        this.cachedHexLilyPadGeo,
+        this.hexIslandMaterial
+      );
+      hexMesh.position.set(lx, topY, lz);
+      group.add(hexMesh);
+
+      obstacles.push({
+        id: `lilypad_${index}_${i}`,
+        kind: 'platform',
+        x: lx,
+        y: topY - 9,
+        z: lz,
+        hx: 130,
+        hy: 9,
+        hz: 150,
+        lethal: false,
+        mesh: hexMesh,
+      });
+
+      // Single apex boost pad on the highest summit island
+      if (i === 5) {
+        this.addBoostPad(group, boostPads, lx, lz, 75, 75, 280, 95, topY);
+      }
+    }
+
+    // 3. Supplementary Neon Surf Rail tucked far out on the left flank (x = -435)
+    const railX = -435;
+    const railMesh = new THREE.Mesh(
+      this.cachedSurfRail950Geo,
+      this.surfWaveMaterial
+    );
+    railMesh.position.set(railX, 0, zMid);
+    group.add(railMesh);
+
+    const railNx = 0.7431; // sin(48°)
+    const railNy = 0.6691; // cos(48°)
+    surfRamps.push({
+      minX: railX,
+      maxX: railX + 60,
+      minY: 0,
+      maxY: 64,
+      minZ: zMid - 475,
+      maxZ: zMid + 475,
+      normal: { x: railNx, y: railNy, z: 0 },
+      planeConstant: (railX + 55) * railNx,
+      forwardBoost: 45,
+    });
+  }
+
+  /**
+   * Recessed Turbine Boost Pad with 3 Floating Holographic Chevron Arches above the pad
+   */
+  private addRecessedTurbinePad(
+    group: THREE.Group,
+    boostPads: BoostPad[],
+    x: number,
+    z: number,
+    hx: number,
+    hz: number,
+    boostUps = 280,
+    liftY = 90,
+    baseY = 0
+  ): void {
+    const effectiveBoost = Math.max(boostUps, 280);
+    const effectiveLift = Math.max(liftY, 80);
+    this.addBoostPad(group, boostPads, x, z, hx, hz, effectiveBoost, effectiveLift, baseY);
+
+    // Sleek single floating holographic chevron arch above the pad
+    const archMesh = new THREE.Mesh(
+      this.cachedHoloChevronArchGeo,
+      this.archMaterial
+    );
+    archMesh.position.set(x, baseY + 14, z);
+    group.add(archMesh);
+  }
+
+  private addBoostPad(
+    group: THREE.Group,
+    boostPads: BoostPad[],
+    x: number,
+    z: number,
+    hx: number,
+    hz: number,
+    boostUps: number,
+    liftY: number,
+    baseY = 0
+  ): void {
+    const padMesh = new THREE.Mesh(
+      this.cachedBoostPadGeo,
+      this.boostPadMaterial
+    );
+    padMesh.scale.set(hx * 2, hz * 2, 1);
+    padMesh.position.set(x, baseY + 0.8, z);
+    group.add(padMesh);
+
+    boostPads.push({
+      x,
+      y: baseY,
+      z,
+      hx,
+      hz,
+      boostUps,
+      liftY,
+    });
+  }
+
+  private addDeckBox(group: THREE.Group, zA: number, zB: number): void {
+    const length = Math.abs(zA - zB);
+    const zCenter = (zA + zB) * 0.5;
+
+    let deckMesh: THREE.Mesh;
+    if (Math.abs(length - TrackGenerator.CHUNK_LENGTH) < 1) {
+      deckMesh = new THREE.Mesh(this.cachedDeckGeo, this.deckMaterial);
+    } else {
+      deckMesh = new THREE.Mesh(this.cachedDeckHalfGeo, this.deckMaterial);
+      deckMesh.scale.set(1, 1, length / 420);
+    }
+    deckMesh.position.set(0, -8, zCenter);
+    group.add(deckMesh);
+  }
+
+  // ============================================================================
+  // COMPETITIVE MODE ARCHETYPES (Gated behind trackMode === 'COMPETITIVE')
+  // ============================================================================
+
+  private buildCompetitiveSlalomChunk(
+    group: THREE.Group,
+    obstacles: ObstacleBox[],
+    boostPads: BoostPad[],
+    index: number,
+    zStart: number,
+    zEnd: number,
+    rng: SeededRandom
+  ): void {
+    const rows = 3;
+    for (let r = 0; r < rows; r++) {
+      const rowZ = zStart - 220 - r * 360;
+      const offsetSign = r % 2 === 0 ? -1 : 1;
+      const pillarPositionsX = offsetSign < 0 ? [-220, 260] : [-260, 220];
+
+      for (const px of pillarPositionsX) {
+        const hx = 54;
+        const hy = 95;
+        const hz = 54;
+        const mesh = this.createNeonBoxMesh(
+          hx * 2,
+          hy * 2,
+          hz * 2,
+          this.pillarMaterial,
+          0x00f3ff
+        );
+        mesh.position.set(px, hy, rowZ);
+        group.add(mesh);
+
+        obstacles.push({
+          id: `slalom_${index}_${r}_${px}`,
+          kind: 'pillar',
+          x: px,
+          y: hy,
+          z: rowZ,
+          hx,
+          hy,
+          hz,
+          lethal: false,
+          mesh,
+        });
+      }
+    }
+
+    this.addElevatedPlatform(
+      group,
+      obstacles,
+      boostPads,
+      index,
+      rng.next() < 0.5 ? -390 : 390,
+      36,
+      (zStart + zEnd) * 0.5,
+      85,
+      380
+    );
+  }
+
+  private buildCompetitiveFroggerChunk(
+    group: THREE.Group,
+    obstacles: ObstacleBox[],
+    boostPads: BoostPad[],
+    index: number,
+    zStart: number,
+    zEnd: number,
+    rng: SeededRandom
+  ): void {
+    const beamCount = 3;
+    for (let b = 0; b < beamCount; b++) {
+      const beamZ = zStart - 240 - b * 360;
+      const hx = 130;
+      const hy = 30;
+      const hz = 30;
+      const speedX = rng.range(1.5, 2.5) * (b % 2 === 0 ? 1 : -1);
+      const phase = rng.range(0, Math.PI * 2);
+      const rangeX = TrackGenerator.HIGHWAY_HALF_WIDTH - hx - 40;
+
+      const mesh = this.createNeonBoxMesh(
+        hx * 2,
+        hy * 2,
+        hz * 2,
+        this.froggerMaterial,
+        0xff007f
+      );
+      mesh.position.set(0, hy, beamZ);
+      group.add(mesh);
+
+      obstacles.push({
+        id: `frogger_${index}_${b}`,
+        kind: 'frogger',
+        x: 0,
+        y: hy,
+        z: beamZ,
+        hx,
+        hy,
+        hz,
+        speedX,
+        phase,
+        rangeX,
+        lethal: false,
+        mesh,
+      });
+    }
+
+    this.addElevatedPlatform(
+      group,
+      obstacles,
+      boostPads,
+      index,
+      0,
+      66,
+      (zStart + zEnd) * 0.5,
+      90,
+      460
+    );
+  }
+
+  private buildCompetitiveLaserHurdlesChunk(
+    group: THREE.Group,
+    obstacles: ObstacleBox[],
+    boostPads: BoostPad[],
+    index: number,
+    zStart: number
+  ): void {
+    const hurdleCount = 3;
+    for (let h = 0; h < hurdleCount; h++) {
+      const hurdleZ = zStart - 250 - h * 350;
+      const isHigh = h === 1;
+      const spanWidth = 720;
+      const laneOffset = (h % 2 === 0 ? -1 : 1) * 140;
+      const yCenter = isHigh ? 68 : 22;
+      const hy = 9;
+      const hx = spanWidth * 0.5;
+      const hz = 12;
+
+      const mesh = this.createNeonBoxMesh(
+        hx * 2,
+        hy * 2,
+        hz * 2,
+        this.laserMaterial,
+        0xff0055
+      );
+      mesh.position.set(laneOffset, yCenter, hurdleZ);
+      group.add(mesh);
+
+      obstacles.push({
+        id: `laser_${index}_${h}`,
+        kind: 'laser',
+        x: laneOffset,
+        y: yCenter,
+        z: hurdleZ,
+        hx,
+        hy,
+        hz,
+        lethal: false,
+        mesh,
+      });
+    }
+
+    this.addBoostPad(group, boostPads, 0, zStart - 110, 90, 75, 85, 90);
   }
 
   private addElevatedPlatform(
@@ -584,7 +1680,7 @@ export class TrackGenerator implements CollisionWorld {
       hx * 2,
       hy * 2,
       hz * 2,
-      this.platformMaterial,
+      this.skyDeckMaterial,
       0x00ff66
     );
     mesh.position.set(x, yCenter, zCenter);
@@ -603,7 +1699,6 @@ export class TrackGenerator implements CollisionWorld {
       mesh,
     });
 
-    // Place a launch boost pad just ahead of the platform entry so runners can vault onto it
     this.addBoostPad(
       group,
       boostPads,
@@ -616,160 +1711,12 @@ export class TrackGenerator implements CollisionWorld {
     );
   }
 
-  private addBoostPad(
-    group: THREE.Group,
-    boostPads: BoostPad[],
-    x: number,
-    z: number,
-    hx: number,
-    hz: number,
-    boostUps: number,
-    liftY: number
-  ): void {
-    const padGeo = new THREE.PlaneGeometry(hx * 2, hz * 2);
-    padGeo.rotateX(-Math.PI * 0.5);
-    const padMesh = new THREE.Mesh(padGeo, this.boostPadMaterial);
-    padMesh.position.set(x, 0.8, z);
-    group.add(padMesh);
-
-    // Inner chevron lines on pad
-    const pts = [
-      x - hx * 0.6, 1.2, z + hz * 0.4, x, 1.2, z - hz * 0.4,
-      x, 1.2, z - hz * 0.4, x + hx * 0.6, 1.2, z + hz * 0.4,
-    ];
-    const lineGeo = new THREE.BufferGeometry();
-    lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    group.add(new THREE.LineSegments(lineGeo, this.limeLineMaterial));
-
-    boostPads.push({
-      x,
-      y: 0,
-      z,
-      hx,
-      hz,
-      boostUps,
-      liftY,
-    });
-  }
-
-  private addSpeedArchesAndSkyline(
-    group: THREE.Group,
-    zStart: number,
-    zEnd: number,
-    width: number,
-    chunkIdx: number,
-    rng: SeededRandom
-  ): void {
-    const halfW = width * 0.5;
-
-    // 1. Overhead Neon Speed Portals every 300 units (crucial optical flow for sense of speed!)
-    for (let z = zStart - 150; z >= zEnd + 100; z -= 300) {
-      const archHeight = 210;
-      const pillarLeft = new THREE.Mesh(
-        new THREE.BoxGeometry(10, archHeight, 10),
-        this.archMaterial
-      );
-      pillarLeft.position.set(-halfW + 6, archHeight * 0.5, z);
-      group.add(pillarLeft);
-
-      const pillarRight = new THREE.Mesh(
-        new THREE.BoxGeometry(10, archHeight, 10),
-        this.archMaterial
-      );
-      pillarRight.position.set(halfW - 6, archHeight * 0.5, z);
-      group.add(pillarRight);
-
-      const topBeam = new THREE.Mesh(
-        new THREE.BoxGeometry(width, 8, 10),
-        this.archMaterial
-      );
-      topBeam.position.set(0, archHeight, z);
-      group.add(topBeam);
-    }
-
-    // 2. Varied Roadside Cyber-Monolith Skyline Towers outside the track rails
-    for (let z = zStart - 200; z >= zEnd + 150; z -= 400) {
-      for (const side of [-1, 1]) {
-        const towerH = rng.range(180, 460);
-        const towerW = rng.range(70, 120);
-        const distOut = halfW + 130 + rng.range(0, 90);
-        const towerMesh = this.createNeonBoxMesh(
-          towerW,
-          towerH,
-          towerW,
-          this.deckMaterial,
-          chunkIdx % 2 === 0 ? 0x00f3ff : 0xff007f
-        );
-        towerMesh.position.set(side * distOut, towerH * 0.5 - 40, z);
-        group.add(towerMesh);
-      }
-    }
-  }
-
-  private addDeckSegment(
-    group: THREE.Group,
-    zStart: number,
-    zEnd: number,
-    width: number,
-    chunkIdx: number
-  ): void {
-    const length = Math.abs(zStart - zEnd);
-    const zCenter = (zStart + zEnd) * 0.5;
-
-    const deckGeo = new THREE.BoxGeometry(width, 16, length);
-    const deckMesh = new THREE.Mesh(deckGeo, this.deckMaterial);
-    deckMesh.position.set(0, -8, zCenter);
-    group.add(deckMesh);
-
-    // Procedural Tron Grid Lines (Cyan longitudinal + alternating Magenta/Lime lateral)
-    const points: number[] = [];
-    const halfW = width * 0.5;
-    const laneSpacing = 100;
-    for (let x = -halfW; x <= halfW; x += laneSpacing) {
-      points.push(x, 0.4, zStart, x, 0.4, zEnd);
-    }
-    const zStep = 75; // Denser lateral grid lines for stronger peripheral speed perception
-    for (let z = zStart; z >= zEnd; z -= zStep) {
-      points.push(-halfW, 0.4, z, halfW, 0.4, z);
-    }
-
-    const lineGeo = new THREE.BufferGeometry();
-    lineGeo.setAttribute(
-      'position',
-      new THREE.Float32BufferAttribute(points, 3)
-    );
-    const mat =
-      Math.abs(chunkIdx) % 3 === 1
-        ? this.magentaLineMaterial
-        : Math.abs(chunkIdx) % 3 === 2
-        ? this.limeLineMaterial
-        : this.cyanLineMaterial;
-    const gridLines = new THREE.LineSegments(lineGeo, mat);
-    group.add(gridLines);
-
-    // Glowing side boundary rails
-    const railPoints = [
-      -halfW, 6, zStart, -halfW, 6, zEnd,
-      halfW, 6, zStart, halfW, 6, zEnd,
-    ];
-    const railGeo = new THREE.BufferGeometry();
-    railGeo.setAttribute(
-      'position',
-      new THREE.Float32BufferAttribute(railPoints, 3)
-    );
-    const rails = new THREE.LineSegments(railGeo, this.magentaLineMaterial);
-    group.add(rails);
-  }
-
   private addNeonJumpChevron(group: THREE.Group, zEdge: number): void {
-    const pts: number[] = [];
-    for (let x = -450; x <= 450; x += 150) {
-      pts.push(x - 45, 1.5, zEdge + 35, x, 1.5, zEdge);
-      pts.push(x, 1.5, zEdge, x + 45, 1.5, zEdge + 35);
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    const lines = new THREE.LineSegments(geo, this.limeLineMaterial);
+    const lines = new THREE.LineSegments(
+      this.cachedJumpChevronsGeo,
+      this.limeLineMaterial
+    );
+    lines.position.set(0, 0, zEdge);
     group.add(lines);
   }
 
@@ -786,9 +1733,39 @@ export class TrackGenerator implements CollisionWorld {
     holder.add(mesh);
 
     const edgesGeo = new THREE.EdgesGeometry(boxGeo);
-    const edgesMat = new THREE.LineBasicMaterial({ color: edgeColor });
+    const edgesMat = new THREE.LineBasicMaterial({
+      color: edgeColor,
+      transparent: true,
+      opacity: 0.75,
+    });
     const wire = new THREE.LineSegments(edgesGeo, edgesMat);
     holder.add(wire);
+
+    // If substantial obstacle (h >= 32, w >= 24), add heavy hazard-striped footing & beveled cap
+    if (h >= 32 && w >= 24 && d >= 24) {
+      const baseH = Math.min(24, h * 0.22);
+      const baseGeo = new THREE.BoxGeometry(w * 1.10, baseH, d * 1.10);
+      const baseMesh = new THREE.Mesh(baseGeo, this.hazardMaterial);
+      baseMesh.position.y = -h * 0.5 + baseH * 0.5;
+      holder.add(baseMesh);
+
+      const capH = 5;
+      const capGeo = new THREE.BoxGeometry(w * 1.05, capH, d * 1.05);
+      const capMesh = new THREE.Mesh(capGeo, mat);
+      capMesh.position.y = h * 0.5 - capH * 0.5;
+      holder.add(capMesh);
+    } else if (mat === this.froggerMaterial && w > 200) {
+      // For moving Frogger beams: heavy magnetic emitter housings on left and right ends
+      const clampW = Math.min(36, w * 0.08);
+      const clampGeo = new THREE.BoxGeometry(clampW, h * 1.4, d * 1.4);
+      const leftClamp = new THREE.Mesh(clampGeo, this.parapetMaterial);
+      leftClamp.position.x = -w * 0.5 + clampW * 0.5;
+      holder.add(leftClamp);
+
+      const rightClamp = new THREE.Mesh(clampGeo, this.parapetMaterial);
+      rightClamp.position.x = w * 0.5 - clampW * 0.5;
+      holder.add(rightClamp);
+    }
 
     return holder;
   }
@@ -796,8 +1773,9 @@ export class TrackGenerator implements CollisionWorld {
   private disposeChunk(chunk: TrackChunk): void {
     this.scene.remove(chunk.group);
     chunk.group.traverse((obj) => {
-      if ((obj as THREE.Mesh).geometry) {
-        (obj as THREE.Mesh).geometry.dispose();
+      const mesh = obj as THREE.Mesh;
+      if (mesh.geometry && !this.sharedGeometries.has(mesh.geometry)) {
+        mesh.geometry.dispose();
       }
     });
   }
@@ -815,17 +1793,79 @@ export class TrackGenerator implements CollisionWorld {
 
     for (const chasm of chunk.chasms) {
       if (z <= chasm.zStart && z >= chasm.zEnd) {
-        // Check if player is on either the left or right outer bridge
         const halfW = TrackGenerator.HIGHWAY_HALF_WIDTH;
         const bridgeW = 155;
         if (Math.abs(x) >= halfW - bridgeW) {
           return 0;
         }
-        return -1000; // Open KZ chasm
+        return -1000;
       }
     }
 
     return 0;
+  }
+
+  /**
+   * Returns active SurfRampCollider volumes around zPos (passed into PlayerPhysics 100Hz step)
+   */
+  public getActiveSurfRamps(zPos: number): SurfRampCollider[] {
+    if (this.flatTestMode) return [];
+    const L = TrackGenerator.CHUNK_LENGTH;
+    const currentChunkIdx = Math.floor(-zPos / L);
+    const result: SurfRampCollider[] = [];
+
+    for (let c = currentChunkIdx - 2; c <= currentChunkIdx + 2; c++) {
+      const chunk = this.chunks.get(c);
+      if (chunk && chunk.surfRamps) {
+        result.push(...chunk.surfRamps);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * CollisionWorld interface alias for getActiveSurfRamps
+   */
+  public getSurfRamps(_x?: number, z?: number): SurfRampCollider[] {
+    if (z === undefined) {
+      if (this.flatTestMode) return [];
+      const all: SurfRampCollider[] = [];
+      for (const chunk of this.chunks.values()) {
+        all.push(...chunk.surfRamps);
+      }
+      return all;
+    }
+    return this.getActiveSurfRamps(z);
+  }
+
+  /**
+   * Returns active AABBBox instances for platforms and obstacles around (x, z)
+   */
+  public getBoxes(_x?: number, z?: number): AABBBox[] {
+    if (this.flatTestMode) return [];
+    const result: AABBBox[] = [];
+    const L = TrackGenerator.CHUNK_LENGTH;
+    const currentChunkIdx = z !== undefined ? Math.floor(-z / L) : 0;
+    const minC = z !== undefined ? currentChunkIdx - 2 : -Infinity;
+    const maxC = z !== undefined ? currentChunkIdx + 2 : Infinity;
+
+    for (const [idx, chunk] of this.chunks.entries()) {
+      if (idx >= minC && idx <= maxC) {
+        for (const obs of chunk.obstacles) {
+          result.push({
+            minX: obs.x - obs.hx,
+            maxX: obs.x + obs.hx,
+            minY: obs.y - obs.hy,
+            maxY: obs.y + obs.hy,
+            minZ: obs.z - obs.hz,
+            maxZ: obs.z + obs.hz,
+            isPlatform: obs.kind === 'platform',
+            lethal: obs.lethal,
+          });
+        }
+      }
+    }
+    return result;
   }
 
   /**
@@ -836,37 +1876,41 @@ export class TrackGenerator implements CollisionWorld {
     vel: THREE.Vector3,
     radius: number,
     height: number
-  ): { hitHazard: boolean; groundedOnObstacle: boolean; supportY: number } {
+  ): CollisionResult {
     if (this.flatTestMode) {
-      return { hitHazard: false, groundedOnObstacle: false, supportY: 0 };
+      return { hitHazard: false, groundedOnObstacle: false, supportY: 0, hitBoostPad: false };
     }
 
-    // Check Derezzing Wall behind player
     if (this.wallEnabled && pos.z > this.wallZ) {
-      return { hitHazard: true, groundedOnObstacle: false, supportY: 0 };
+      return { hitHazard: true, groundedOnObstacle: false, supportY: 0, hitBoostPad: false };
     }
 
     const L = TrackGenerator.CHUNK_LENGTH;
     const idx = Math.floor(-pos.z / L);
     let groundedOnObstacle = false;
     let supportY = 0;
+    let hitBoostPad = false;
+    let boostedUps = 0;
 
     for (let c = idx - 1; c <= idx + 1; c++) {
       const chunk = this.chunks.get(c);
       if (!chunk) continue;
 
-      // Check Emerald Boost Pads
+      // Check Recessed Turbine / Emerald Boost Pads
       for (const pad of chunk.boostPads) {
         if (
           Math.abs(pos.x - pad.x) < pad.hx + radius &&
           Math.abs(pos.z - pad.z) < pad.hz + radius &&
-          pos.y <= pad.y + 24
+          pos.y >= pad.y - 16 &&
+          pos.y <= pad.y + 36
         ) {
           const now = performance.now() * 0.001;
-          if (now - this.lastBoostPadTime > 0.25) {
+          if (now - this.lastBoostPadTime > 0.22) {
             this.lastBoostPadTime = now;
+            hitBoostPad = true;
+            boostedUps = Math.max(pad.boostUps, 280);
             const currentSpeed = Math.hypot(vel.x, vel.z);
-            const targetSpeed = Math.max(currentSpeed + pad.boostUps, 380);
+            const targetSpeed = Math.max(currentSpeed + boostedUps, 640);
             if (currentSpeed > 20) {
               const scale = targetSpeed / currentSpeed;
               vel.x *= scale;
@@ -895,10 +1939,13 @@ export class TrackGenerator implements CollisionWorld {
           pos.z > minZ &&
           pos.z < maxZ &&
           pos.y + height > minY &&
-          pos.y < maxY
+          pos.y <= maxY + 0.5
         ) {
-          // Check if player is landing on top of the obstacle / platform
-          if (pos.y >= maxY - 18 && vel.y <= 0) {
+          // Auto-Step-Up Lip Forgiveness (sv_stepsize = 20) & Top Landing
+          const stepDiff = maxY - pos.y;
+          if (stepDiff >= -0.5 && stepDiff <= 20 && vel.y <= 35) {
+            pos.y = maxY;
+            if (vel.y < 0) vel.y = 0;
             groundedOnObstacle = true;
             supportY = Math.max(supportY, maxY);
             continue;
@@ -908,12 +1955,11 @@ export class TrackGenerator implements CollisionWorld {
             return { hitHazard: true, groundedOnObstacle: false, supportY: 0 };
           }
 
-          // Platforms can be run underneath if player is below minY
-          if (obs.kind === 'platform' && pos.y + height * 0.7 < minY) {
+          // Elevated platforms act as one-way top decks in forgiving mode (solid obstacles when strictCollisions is enabled)
+          if (obs.kind === 'platform' && !this.strictCollisions) {
             continue;
           }
 
-          // Push out along shallowest horizontal axis (GoldSrc clip-velocity feel)
           const overlapLeft = pos.x - minX;
           const overlapRight = maxX - pos.x;
           const overlapBack = maxZ - pos.z;
@@ -943,6 +1989,6 @@ export class TrackGenerator implements CollisionWorld {
       }
     }
 
-    return { hitHazard: false, groundedOnObstacle, supportY };
+    return { hitHazard: false, groundedOnObstacle, supportY, hitBoostPad, boostUps: boostedUps };
   }
 }

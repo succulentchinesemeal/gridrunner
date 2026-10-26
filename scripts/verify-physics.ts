@@ -89,4 +89,116 @@ if (track.totalSpawnedChunks < 8 || track.totalDespawnedChunks < 2) {
   throw new Error('Track chunk spawn/despawn check failed');
 }
 
-console.log('ALL GOLDSRC PHYSICS & PROCEDURAL TRACK CHECKS PASSED!');
+// 4. Test C: Strict Collisions vs Flow Mode (Elevated Platform Side-Hit)
+console.log('\n--- Test C: Flow vs Strict Platform Collisions ---');
+const platformBox = {
+  minX: -50,
+  maxX: 50,
+  minY: 10,
+  maxY: 60,
+  minZ: -140,
+  maxZ: -90,
+  type: 'PLATFORM' as const,
+  isPlatform: true,
+};
+
+// Flow mode: player running into platform side should bypass it (not snag)
+const flowPhysics = new PlayerPhysics(new PerkManager(DEFAULT_GOLDSRC_STATS));
+flowPhysics.strictCollisions = false;
+flowPhysics.pos.set(0, 0, -50);
+flowPhysics.vel.set(0, 0, -400);
+
+for (let t = 0; t < 20; t++) {
+  flowPhysics.stepTick(
+    { fmove: 320, smove: 0, viewYaw: 0, jumpHeld: false, jumpEdge: false, dashPressed: false },
+    GOLDSRC_DT,
+    undefined,
+    undefined,
+    [platformBox]
+  );
+}
+console.log(`[Flow Mode] Velocity Z after platform passage: ${flowPhysics.vel.z.toFixed(2)} (Expected ~ -400)`);
+if (flowPhysics.vel.z > -300) {
+  throw new Error(`Flow mode failed: blocked by elevated platform (${flowPhysics.vel.z})`);
+}
+
+// Strict mode: player running into platform side below step threshold must be blocked/deflected
+const strictPhysics = new PlayerPhysics(new PerkManager(DEFAULT_GOLDSRC_STATS));
+strictPhysics.strictCollisions = true;
+strictPhysics.pos.set(0, 0, -50);
+strictPhysics.vel.set(0, 0, -400);
+
+for (let t = 0; t < 20; t++) {
+  strictPhysics.stepTick(
+    { fmove: 320, smove: 0, viewYaw: 0, jumpHeld: false, jumpEdge: false, dashPressed: false },
+    GOLDSRC_DT,
+    undefined,
+    undefined,
+    [platformBox]
+  );
+}
+console.log(`[Strict Mode] Velocity Z after platform impact: ${strictPhysics.vel.z.toFixed(2)} (Expected 0 or positive deflection)`);
+if (strictPhysics.vel.z <= -200) {
+  throw new Error(`Strict mode failed: did not block elevated platform collision (${strictPhysics.vel.z})`);
+}
+
+// TrackGenerator Strict Collisions check
+const trackScene = new THREE.Scene();
+const trackStrict = new TrackGenerator(trackScene, 9999, 'FLOW');
+console.log(`Initial Track strictCollisions: ${trackStrict.strictCollisions}`);
+trackStrict.setStrictCollisions(true);
+if (!trackStrict.strictCollisions) {
+  throw new Error('TrackGenerator setStrictCollisions(true) failed');
+}
+trackStrict.setTrackMode('COMPETITIVE');
+if (!trackStrict.strictCollisions) {
+  throw new Error('TrackGenerator setTrackMode COMPETITIVE did not enable strictCollisions');
+}
+trackStrict.setTrackMode('FLOW');
+if (trackStrict.strictCollisions) {
+  throw new Error('TrackGenerator setTrackMode FLOW did not disable strictCollisions');
+}
+
+// 5. Test D: Player-to-Player Elastic Cyber Bump
+console.log('\n--- Test D: Player Cyber Bumping in Strict Mode ---');
+let bumpCalled = false;
+let bumpSpeed = 0;
+const bumpPhysics = new PlayerPhysics(new PerkManager(DEFAULT_GOLDSRC_STATS), {
+  onPlayerBump: (spd) => {
+    bumpCalled = true;
+    bumpSpeed = spd;
+  },
+});
+bumpPhysics.strictCollisions = true;
+bumpPhysics.pos.set(0, 0, 0);
+bumpPhysics.vel.set(0, 0, -300);
+
+const otherRunner = {
+  id: 'remote-1',
+  x: 0,
+  y: 0,
+  z: -25, // directly ahead within radius (radius sum = 48)
+  vx: 0,
+  vy: 0,
+  vz: 0,
+  alive: true,
+};
+
+bumpPhysics.stepTick(
+  { fmove: 0, smove: 0, viewYaw: 0, jumpHeld: false, jumpEdge: false, dashPressed: false },
+  GOLDSRC_DT,
+  undefined,
+  undefined,
+  undefined,
+  [otherRunner]
+);
+
+console.log(`[Player Bump] Callback triggered: ${bumpCalled} | Rel Speed: ${bumpSpeed.toFixed(1)} | Vel Z after bump: ${bumpPhysics.vel.z.toFixed(1)}`);
+if (!bumpCalled) {
+  throw new Error('Player bump callback was not triggered');
+}
+if (bumpPhysics.vel.z >= -200) {
+  console.log('Player elastic deflection verified!');
+}
+
+console.log('\nALL GOLDSRC PHYSICS & PROCEDURAL TRACK CHECKS PASSED!');

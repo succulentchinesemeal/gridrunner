@@ -161,7 +161,13 @@ test.describe('GRIDRUNNER — GoldSrc 100Hz Cyber-Bhop Verification Suite', () =
     });
 
     expect(trackVerification.initialArchetypes).toEqual(
-      expect.arrayContaining(['SLALOM', 'FROGGER', 'KZ_CHASM', 'LASER_HURDLES'])
+      expect.arrayContaining([
+        'RUNWAY',
+        'CANYON_WAVE',
+        'SPLIT_ELEVATION',
+        'HALFPIPE_CARVE',
+        'SKY_ARCHIPELAGO',
+      ])
     );
     expect(trackVerification.distance).toBeGreaterThan(3500);
     expect(trackVerification.totalSpawned).toBeGreaterThan(8);
@@ -464,5 +470,70 @@ test.describe('GRIDRUNNER — GoldSrc 100Hz Cyber-Bhop Verification Suite', () =
     await context1.close();
     await context2.close();
     await context3.close();
+  });
+
+  test('Milestone 6 — Flow Park Track, Continuous 45° Surf Curbs, PM_ClipVelocity Surfing, Hex Islands & Step-Up Forgiveness', async ({
+    page,
+  }) => {
+    await page.goto('/?room=m6_flow_surf');
+    await page.waitForFunction(() => Boolean(window.__GAME_STATE__));
+
+    const flowVerification = await page.evaluate(() => {
+      const ctrl = window.__GAME_CONTROLS__;
+      ctrl.resetPlayer(false); // Enable full procedural track with outer surf curbs & flow park
+
+      const trackStats = window.__GAME_STATE__.trackStats;
+
+      // Drive player toward outer left 45° surf curb (x < -515, y > 5)
+      // and verify surfing along the continuous outer curb
+      let surfDetected = false;
+      for (let t = 0; t < 240; t++) {
+        ctrl.stepPhysicsTicks(1, {
+          fmove: 320,
+          smove: -320, // Strafe left into the 45° surf bank
+          viewYaw: 0,
+          jumpHeld: false,
+          jumpEdge: false,
+          dashPressed: false,
+        });
+        const lp = window.__GAME_STATE__.localPlayer;
+        if (lp.isSurfing || (lp.pos.x <= -505 && lp.pos.y > 5)) {
+          surfDetected = true;
+        }
+      }
+
+      const flowArchetypes = [...window.__GAME_STATE__.trackStats.archetypes];
+
+      // Also verify switching to COMPETITIVE mode
+      ctrl.setTrackMode?.('COMPETITIVE');
+      const compArchetypes = [...window.__GAME_STATE__.trackStats.archetypes];
+      ctrl.setTrackMode?.('FLOW');
+
+      return {
+        mode: trackStats.mode,
+        activeChunks: trackStats.activeChunks,
+        totalSpawned: trackStats.totalSpawnedChunks,
+        surfDetected,
+        flowArchetypes,
+        compArchetypes,
+        localPlayer: window.__GAME_STATE__.localPlayer,
+      };
+    });
+
+    expect(flowVerification.mode).toBe('FLOW');
+    expect(flowVerification.activeChunks).toBeGreaterThanOrEqual(5);
+    expect(flowVerification.surfDetected).toBe(true);
+    expect(flowVerification.flowArchetypes).toEqual(
+      expect.arrayContaining([
+        'RUNWAY',
+        'CANYON_WAVE',
+        'SPLIT_ELEVATION',
+        'HALFPIPE_CARVE',
+        'SKY_ARCHIPELAGO',
+      ])
+    );
+    expect(flowVerification.compArchetypes).toEqual(
+      expect.arrayContaining(['SLALOM', 'FROGGER', 'KZ_CHASM', 'LASER_HURDLES'])
+    );
   });
 });

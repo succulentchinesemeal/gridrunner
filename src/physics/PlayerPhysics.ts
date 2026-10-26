@@ -19,6 +19,50 @@ export interface MoveCmd {
   dashPressed: boolean;
 }
 
+export interface SurfRampCollider {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  minZ: number;
+  maxZ: number;
+  normal: { x: number; y: number; z: number }; // Unit normal pointing out of the sloped face
+  planeConstant: number; // d = normal.x * px + normal.y * py + normal.z * pz for a point p on the ramp plane
+  forwardBoost?: number; // Optional bonus forward UPS when actively surfing this ramp
+}
+
+export interface AABBBox {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  minZ: number;
+  maxZ: number;
+  isPlatform?: boolean;
+  lethal?: boolean;
+}
+
+export interface PlayerCollider {
+  id?: string;
+  x: number;
+  y: number;
+  z: number;
+  vx?: number;
+  vy?: number;
+  vz?: number;
+  radius?: number;
+  height?: number;
+  alive?: boolean;
+}
+
+export interface CollisionResult {
+  hitHazard: boolean;
+  groundedOnObstacle: boolean;
+  supportY: number;
+  hitBoostPad?: boolean;
+  boostUps?: number;
+}
+
 export interface CollisionWorld {
   /** Returns the floor height at (x, z), or -Infinity if over a KZ chasm gap */
   getFloorHeight(x: number, z: number): number;
@@ -28,7 +72,30 @@ export interface CollisionWorld {
     vel: THREE.Vector3,
     radius: number,
     height: number
-  ): { hitHazard: boolean; groundedOnObstacle: boolean; supportY: number };
+  ): CollisionResult;
+  /** Optional surf ramp colliders in the world */
+  getSurfRamps?(x?: number, z?: number): SurfRampCollider[];
+  surfRamps?: SurfRampCollider[];
+  /** Optional AABB obstacle/platform boxes in the world */
+  getBoxes?(x?: number, z?: number): AABBBox[];
+  boxes?: AABBBox[];
+}
+
+/**
+ * Exact GoldSrc PM_ClipVelocity from Half-Life 1 / CS 1.6 pm_shared.c
+ * Projects velocity along the surface plane normal with overbounce = 1.0:
+ * backoff = dot(velocity, normal) * overbounce; velocity -= normal * backoff
+ */
+export function PM_ClipVelocity(
+  vel: THREE.Vector3,
+  normal: { x: number; y: number; z: number },
+  overbounce: number = 1.0
+): void {
+  const backoff =
+    (vel.x * normal.x + vel.y * normal.y + vel.z * normal.z) * overbounce;
+  vel.x -= normal.x * backoff;
+  vel.y -= normal.y * backoff;
+  vel.z -= normal.z * backoff;
 }
 
 /**
@@ -112,7 +179,9 @@ export function PM_Friction(
 export interface PhysicsCallbacks {
   onJump?: (ups: number, isBhop: boolean, isDoubleJump: boolean) => void;
   onDash?: (ups: number) => void;
+  onBoost?: (ups: number) => void;
   onHazardHit?: () => void;
+  onPlayerBump?: (relSpeed: number) => void;
 }
 
 export class PlayerPhysics {
@@ -124,6 +193,9 @@ export class PlayerPhysics {
   public grounded = true;
   public alive = true;
 
+  /** Whether strict solid platform and player collisions are enabled (Skill / Competitive element) */
+  public strictCollisions = false;
+
   /** Scroll-wheel +jump buffer in ticks (3 ticks = 30ms window) */
   public jumpBufferTicks = 0;
   /** Remaining mid-air double jumps */
@@ -132,6 +204,8 @@ export class PlayerPhysics {
   public dashCooldownTimer = 0;
   /** Number of consecutive bunny-hops without losing grounded momentum */
   public bhopChain = 0;
+  /** Friction grace window (in seconds) after hitting a boost pad so ground friction doesn't immediately kill speed */
+  public boostGraceTimer = 0;
 
   /** Strafe Sync percentage (0..100) */
   public strafeSync = 0;
@@ -145,6 +219,30 @@ export class PlayerPhysics {
 
   public readonly playerRadius = 16;
   public readonly playerHeight = 56;
+
+  /** Active surf ramp colliders in the world */
+  public surfRamps: SurfRampCollider[] = [];
+  /** Whether the player is currently surfing on a steep ramp */
+  public isSurfing = false;
+  /** Current surf plane normal */
+  public surfNormal: { x: number; y: number; z: number } = { x: 0, y: 1, z: 0 };
+  /** Angle of the active surf ramp in radians */
+  public get surfRampAngle(): number {
+    if (!this.isSurfing) return 0;
+    return Math.atan2(-this.surfNormal.x, this.surfNormal.y);
+  }
+  /** Active AABB obstacle/platform boxes */
+  public boxes: AABBBox[] = [];
+  private hasRampJumped = false;
+  private surfTicks = 0;
+  private surfCoyoteTicks = 0;
+
+  public get isGrounded(): boolean {
+    return this.grounded;
+  }
+  public set isGrounded(val: boolean) {
+    this.grounded = val;
+  }
 
   private accumulator = 0;
   private perkManager: PerkManager;
@@ -182,12 +280,218 @@ export class PlayerPhysics {
     this.jumpBufferTicks = 0;
     this.remainingAirJumps = this.stats.extraJumps;
     this.dashCooldownTimer = 0;
+    this.boostGraceTimer = 0;
+    this.bhopChain = 0;
     this.bhopChain = 0;
     this.strafeSync = 0;
     this.syncSamples = [];
     this.topUps = 0;
     this.rollAngleDeg = 0;
     this.accumulator = 0;
+    this.isSurfing = false;
+    this.surfNormal = { x: 0, y: 1, z: 0 };
+    this.hasRampJumped = false;
+    this.surfTicks = 0;
+    this.surfCoyoteTicks = 0;
+  }
+
+  public addSurfRamp(ramp: SurfRampCollider): void {
+    this.surfRamps.push(ramp);
+  }
+
+  public clearSurfRamps(): void {
+    this.surfRamps = [];
+  }
+
+  public addBox(box: AABBBox): void {
+    this.boxes.push(box);
+  }
+
+  public clearBoxes(): void {
+    this.boxes = [];
+  }
+
+  /**
+   * Executes a smooth, rhythmic dismount jump off a surf ramp:
+   * Uses standard jumpImpulse vertically so bhop timing stays consistent,
+   * pushes gently away from the bank normal, and adds forward flow along heading.
+   */
+  public executeRampJump(): void {
+    const stats = this.stats;
+    this.grounded = false;
+    this.vel.y = Math.max(this.vel.y, stats.jumpImpulse);
+    this.vel.x += this.surfNormal.x * 55;
+
+    const forwardX = -Math.sin(this.viewYaw);
+    const forwardZ = -Math.cos(this.viewYaw);
+    this.vel.x += forwardX * 42;
+    this.vel.z += forwardZ * 42;
+
+    const hSpeed = Math.hypot(this.vel.x, this.vel.z);
+    if (hSpeed > stats.maxBhopSpeed) {
+      const scale = stats.maxBhopSpeed / hSpeed;
+      this.vel.x *= scale;
+      this.vel.z *= scale;
+    }
+
+    this.jumpBufferTicks = 0;
+    this.remainingAirJumps = Math.max(
+      1,
+      Math.min(stats.extraJumps, this.remainingAirJumps + 1)
+    );
+    const currentUps = this.ups;
+    const isBhop = currentUps > stats.sv_maxspeed * 0.95;
+    if (isBhop) {
+      this.bhopChain++;
+    } else {
+      this.bhopChain = 1;
+    }
+    this.callbacks.onJump?.(currentUps, isBhop, false);
+    this.isSurfing = false;
+    this.surfTicks = 0;
+    this.surfCoyoteTicks = 0;
+  }
+
+  /**
+   * Checks if player hull is actively in contact with any surf ramp slope
+   */
+  public isNearSurfRamp(ramps: SurfRampCollider[]): boolean {
+    const SURF_CONTACT_DIST = 4.0;
+    for (const ramp of ramps) {
+      const rMinX = Math.min(ramp.minX, ramp.maxX);
+      const rMaxX = Math.max(ramp.minX, ramp.maxX);
+      const rMinY = Math.min(ramp.minY, ramp.maxY);
+      const rMaxY = Math.max(ramp.minY, ramp.maxY);
+      const rMinZ = Math.min(ramp.minZ, ramp.maxZ);
+      const rMaxZ = Math.max(ramp.minZ, ramp.maxZ);
+
+      if (
+        this.pos.x < rMinX - 8 ||
+        this.pos.x > rMaxX + 8 ||
+        this.pos.y + this.playerHeight < rMinY ||
+        this.pos.y > rMaxY + 4 ||
+        this.pos.z < rMinZ - 8 ||
+        this.pos.z > rMaxZ + 8
+      ) {
+        continue;
+      }
+
+      const nLen = Math.hypot(ramp.normal.x, ramp.normal.y, ramp.normal.z);
+      const nx = nLen > 0 ? ramp.normal.x / nLen : 0;
+      const ny = nLen > 0 ? ramp.normal.y / nLen : 1;
+      const nz = nLen > 0 ? ramp.normal.z / nLen : 0;
+
+      const dist =
+        this.pos.x * nx + this.pos.y * ny + this.pos.z * nz - ramp.planeConstant;
+      if (dist >= -14 && dist <= SURF_CONTACT_DIST) {
+        // Do not yank a player off the flat floor before they actually reach the slope
+        if (this.pos.y <= 0.5 && dist > 1.2) {
+          continue;
+        }
+        if (ny < 0.75) {
+          this.surfNormal = { x: nx, y: ny, z: nz };
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Auto-Step-Up Lip Forgiveness (sv_stepsize = 20) & One-Way Platform Support:
+   * - Smoothly steps the player up onto any box/platform within 20 units of their feet
+   *   while keeping 100% of horizontal bhop velocity intact.
+   * - Elevated platforms (box.isPlatform === true) act as one-way top surfaces so
+   *   players bhopping underneath or alongside them are never blocked horizontally.
+   */
+  public resolveAABBCollisions(boxes: AABBBox[]): {
+    groundedOnBox: boolean;
+    supportY: number;
+  } {
+    const radius = this.playerRadius;
+    const height = this.playerHeight;
+    let groundedOnBox = false;
+    let supportY = 0;
+
+    for (const box of boxes) {
+      const bMinX = Math.min(box.minX, box.maxX);
+      const bMaxX = Math.max(box.minX, box.maxX);
+      const bMinY = Math.min(box.minY, box.maxY);
+      const bMaxY = Math.max(box.minY, box.maxY);
+      const bMinZ = Math.min(box.minZ, box.maxZ);
+      const bMaxZ = Math.max(box.minZ, box.maxZ);
+
+      const expandedMinX = bMinX - radius;
+      const expandedMaxX = bMaxX + radius;
+      const expandedMinZ = bMinZ - radius;
+      const expandedMaxZ = bMaxZ + radius;
+
+      // Check if player hull overlaps horizontally and vertically (inclusive of standing on top)
+      if (
+        this.pos.x > expandedMinX &&
+        this.pos.x < expandedMaxX &&
+        this.pos.z > expandedMinZ &&
+        this.pos.z < expandedMaxZ &&
+        this.pos.y + height > bMinY &&
+        this.pos.y <= bMaxY + 0.5
+      ) {
+        if (box.lethal) {
+          this.alive = false;
+          this.callbacks.onHazardHit?.();
+          return { groundedOnBox: false, supportY: 0 };
+        }
+
+        const playerBottomY = this.pos.y;
+        const stepDiff = bMaxY - playerBottomY;
+
+        // Auto-Step-Up Lip Forgiveness (sv_stepsize = 20)
+        if (stepDiff >= -0.5 && stepDiff <= 20 && this.vel.y <= 35) {
+          this.pos.y = bMaxY;
+          if (this.vel.y < 0) {
+            this.vel.y = 0;
+          }
+          this.grounded = true;
+          this.remainingAirJumps = this.stats.extraJumps;
+          groundedOnBox = true;
+          supportY = Math.max(supportY, bMaxY);
+          continue;
+        }
+
+        // In forgiving mode, elevated flow platforms are one-way from above: never snag or block horizontal bhop lines
+        if (box.isPlatform && !this.strictCollisions) {
+          continue;
+        }
+
+        // Push out along shallowest horizontal axis for solid non-platform blockers
+        const overlapLeft = this.pos.x - expandedMinX;
+        const overlapRight = expandedMaxX - this.pos.x;
+        const overlapBack = expandedMaxZ - this.pos.z;
+        const overlapFront = this.pos.z - expandedMinZ;
+
+        const minOverlap = Math.min(
+          overlapLeft,
+          overlapRight,
+          overlapBack,
+          overlapFront
+        );
+
+        if (minOverlap === overlapLeft) {
+          this.pos.x = expandedMinX;
+          if (this.vel.x > 0) this.vel.x = 0;
+        } else if (minOverlap === overlapRight) {
+          this.pos.x = expandedMaxX;
+          if (this.vel.x < 0) this.vel.x = 0;
+        } else if (minOverlap === overlapBack) {
+          this.pos.z = expandedMaxZ;
+          if (this.vel.z < 0) this.vel.z = 0;
+        } else {
+          this.pos.z = expandedMinZ;
+          if (this.vel.z > 0) this.vel.z = 0;
+        }
+      }
+    }
+
+    return { groundedOnBox, supportY };
   }
 
   /**
@@ -198,29 +502,48 @@ export class PlayerPhysics {
   }
 
   /**
-   * Advances simulation using a fixed 100Hz GoldSrc timestep and returns interpolation alpha
+   * Advances simulation using a fixed 100Hz GoldSrc timestep and returns interpolation alpha.
+   * Linearly interpolates viewYaw across sub-ticks so yawDelta never drops to 0 on multi-tick frames.
    */
   public update(
     frameDt: number,
     cmd: MoveCmd,
-    world?: CollisionWorld
+    world?: CollisionWorld,
+    surfRamps?: SurfRampCollider[],
+    boxes?: AABBBox[],
+    otherPlayers?: PlayerCollider[]
   ): number {
     const clampedDt = Math.min(frameDt, 0.1);
     this.accumulator += clampedDt;
+
+    const totalTicks = Math.floor(this.accumulator / GOLDSRC_DT);
+    if (totalTicks <= 0) {
+      return this.accumulator / GOLDSRC_DT;
+    }
+
+    const startYaw = this.viewYaw;
+    let totalYawDiff = cmd.viewYaw - startYaw;
+    while (totalYawDiff > Math.PI) totalYawDiff -= Math.PI * 2;
+    while (totalYawDiff < -Math.PI) totalYawDiff += Math.PI * 2;
 
     // Edge inputs should be consumed on the first tick inside this frame
     let edgeJump = cmd.jumpEdge;
     let edgeDash = cmd.dashPressed;
 
-    while (this.accumulator >= GOLDSRC_DT) {
+    for (let i = 1; i <= totalTicks; i++) {
+      const tickYaw = startYaw + totalYawDiff * (i / totalTicks);
       this.stepTick(
         {
           ...cmd,
+          viewYaw: tickYaw,
           jumpEdge: edgeJump,
           dashPressed: edgeDash,
         },
         GOLDSRC_DT,
-        world
+        world,
+        surfRamps,
+        boxes,
+        otherPlayers
       );
       edgeJump = false;
       edgeDash = false;
@@ -236,7 +559,10 @@ export class PlayerPhysics {
   public stepTick(
     cmd: MoveCmd,
     dt: number = GOLDSRC_DT,
-    world?: CollisionWorld
+    world?: CollisionWorld,
+    surfRamps?: SurfRampCollider[],
+    boxes?: AABBBox[],
+    otherPlayers?: PlayerCollider[]
   ): void {
     if (!this.alive) return;
 
@@ -244,7 +570,9 @@ export class PlayerPhysics {
     const stats = this.stats;
 
     this.viewYaw = cmd.viewYaw;
-    const yawDelta = this.viewYaw - this.prevViewYaw;
+    let yawDelta = this.viewYaw - this.prevViewYaw;
+    while (yawDelta > Math.PI) yawDelta -= Math.PI * 2;
+    while (yawDelta < -Math.PI) yawDelta += Math.PI * 2;
     this.prevViewYaw = this.viewYaw;
 
     // Update GoldSrc cl_rollangle (2.5 deg when strafing A or D)
@@ -254,6 +582,28 @@ export class PlayerPhysics {
     if (this.dashCooldownTimer > 0) {
       this.dashCooldownTimer = Math.max(0, this.dashCooldownTimer - dt);
     }
+
+    // Collect all active surf ramps
+    const activeRamps: SurfRampCollider[] = [
+      ...this.surfRamps,
+      ...(surfRamps ?? []),
+      ...(world?.surfRamps ?? []),
+      ...(world && !surfRamps && world.getSurfRamps
+        ? world.getSurfRamps(this.pos.x, this.pos.z)
+        : []),
+      ...((world as any)?.getRamps ? (world as any).getRamps(this.pos.x, this.pos.z) : []),
+      ...((world as any)?.ramps ?? []),
+    ];
+
+    // Collect custom AABB boxes (world obstacles are resolved via world.resolveCollisions)
+    const activeBoxes: AABBBox[] = [
+      ...this.boxes,
+      ...(boxes ?? []),
+      ...(world?.boxes ?? []),
+      ...(!world?.resolveCollisions && world?.getBoxes
+        ? world.getBoxes(this.pos.x, this.pos.z)
+        : []),
+    ];
 
     // 1. Construct horizontal forward and right unit vectors from Camera Yaw (viewYaw)
     // viewYaw = 0 points along -Z: forward = (0, 0, -1), right = (1, 0, 0)
@@ -294,9 +644,33 @@ export class PlayerPhysics {
       this.callbacks.onDash?.(this.ups);
     }
 
+    const wantsJump = cmd.jumpHeld || cmd.jumpEdge || this.jumpBufferTicks > 0;
+    let jumpedThisTick = false;
+    const isSurfingNow =
+      this.isSurfing ||
+      this.surfCoyoteTicks > 0 ||
+      this.isNearSurfRamp(activeRamps);
+
+    // Deliberate surf dismount jump:
+    // - Fresh jump press (jumpEdge) or scroll wheel (jumpBufferTicks > 0) after latching onto ramp, OR
+    // - Holding Space while steering away from the ramp after surfing for at least 14 ticks
+    const steeringAwayFromSurf =
+      (this.surfNormal.x > 0.2 && cmd.smove > 0) ||
+      (this.surfNormal.x < -0.2 && cmd.smove < 0);
+    const wantsSurfDismount =
+      cmd.jumpEdge ||
+      (this.jumpBufferTicks > 0 && this.surfTicks >= 2) ||
+      (cmd.jumpHeld &&
+        !this.hasRampJumped &&
+        this.surfTicks >= 14 &&
+        steeringAwayFromSurf);
+
     // 3. CRITICAL GOLDSRC ORDER: Process PM_CheckJump() BEFORE PM_Friction()!
-    if (this.grounded) {
-      const wantsJump = cmd.jumpHeld || cmd.jumpEdge || this.jumpBufferTicks > 0;
+    if (isSurfingNow && wantsSurfDismount) {
+      this.executeRampJump();
+      jumpedThisTick = true;
+      this.hasRampJumped = true;
+    } else if (this.grounded) {
       if (wantsJump) {
         this.grounded = false;
         this.vel.y = stats.jumpImpulse;
@@ -310,14 +684,16 @@ export class PlayerPhysics {
           this.bhopChain = 1;
         }
         this.callbacks.onJump?.(currentUps, isBhop, false);
+        jumpedThisTick = true;
       }
-    } else {
+    } else if (!isSurfingNow) {
       // Mid-air Double Jump check (preserves 100% of horizontal bhop velocity)
       if (cmd.jumpEdge && this.remainingAirJumps > 0) {
         this.vel.y = stats.jumpImpulse;
         this.remainingAirJumps--;
         this.jumpBufferTicks = 0;
         this.callbacks.onJump?.(this.ups, true, true);
+        jumpedThisTick = true;
       }
     }
 
@@ -331,29 +707,47 @@ export class PlayerPhysics {
       if (this.ups < stats.sv_maxspeed * 0.9) {
         this.bhopChain = 0;
       }
-      PM_Friction(this.vel, stats.sv_friction, stats.sv_stopspeed, dt);
+      if (this.boostGraceTimer > 0) {
+        // Friction grace during boost pad burst so speed isn't instantly choked by ground friction
+        this.boostGraceTimer = Math.max(0, this.boostGraceTimer - dt);
+      } else {
+        PM_Friction(this.vel, stats.sv_friction, stats.sv_stopspeed, dt);
+      }
       PM_Accelerate(this.vel, wishdir, wishspeed, stats.sv_accelerate, dt);
       this.vel.y = 0;
     } else {
       const prevSpeed = this.ups;
 
-      // When airborne, releasing W (fmove === 0), holding A/D (smove !== 0), and turning viewYaw
-      // in sync with the strafe direction, align wishdir with the optimal GoldSrc strafe tangent
-      // so S-curve mouse whips compound speed smoothly without obtuse braking.
+      // When airborne and pressing A or D (smove !== 0), decouple forward W from locking out
+      // PM_AirAccelerate's 30 UPS dot-product cap so players can steer/carve smoothly even if W is held.
+      const airWishDir = wishdir.clone();
+      let airWishSpeed = wishspeed;
+      if (cmd.smove !== 0 && cmd.fmove !== 0) {
+        airWishDir
+          .set(
+            right.x * Math.sign(cmd.smove) + forward.x * 0.12 * Math.sign(cmd.fmove),
+            0,
+            right.z * Math.sign(cmd.smove) + forward.z * 0.12 * Math.sign(cmd.fmove)
+          )
+          .normalize();
+        airWishSpeed = stats.sv_maxspeed;
+      }
+
+      // When airborne, holding A/D (smove !== 0), and turning viewYaw in sync with the strafe direction,
+      // align wishdir with the optimal GoldSrc strafe tangent so S-curve mouse turns compound speed smoothly.
       const isSyncedAirStrafe =
-        cmd.fmove === 0 &&
         cmd.smove !== 0 &&
         prevSpeed > 50 &&
-        ((cmd.smove < 0 && yawDelta > 0.0001) ||
-          (cmd.smove > 0 && yawDelta < -0.0001));
+        ((cmd.smove < 0 && yawDelta > 0.00005) ||
+          (cmd.smove > 0 && yawDelta < -0.00005));
 
       if (isSyncedAirStrafe) {
         const vxNorm = this.vel.x / prevSpeed;
         const vzNorm = this.vel.z / prevSpeed;
         const perpX = cmd.smove < 0 ? vzNorm : -vzNorm;
         const perpZ = cmd.smove < 0 ? -vxNorm : vxNorm;
-        const forwardBias = 0.015;
-        wishdir
+        const forwardBias = cmd.fmove === 0 ? 0.015 : 0.009;
+        airWishDir
           .set(
             perpX + vxNorm * forwardBias,
             0,
@@ -364,34 +758,31 @@ export class PlayerPhysics {
 
       PM_AirAccelerate(
         this.vel,
-        wishdir,
-        wishspeed,
+        airWishDir,
+        airWishSpeed,
         stats.sv_airaccelerate,
         dt,
         stats.airWishCap
       );
       const postSpeed = this.ups;
 
-      if (isSyncedAirStrafe && postSpeed > 50) {
-        // Keep velocity carving smoothly along the camera's S-curve heading
-        // while preserving 100% of the exact horizontal speed computed by PM_AirAccelerate
-        const strafeLead = cmd.smove < 0 ? 0.18 : -0.18;
-        const targetHeading = this.viewYaw + strafeLead;
+      if (isSyncedAirStrafe && postSpeed > 50 && !this.isSurfing) {
+        // Smoothly carve velocity toward camera viewYaw without any artificial left/right lead offset
+        // so switching from A to D never whips the velocity vector.
         const currentHeading = Math.atan2(-this.vel.x, -this.vel.z);
-        let diff = targetHeading - currentHeading;
+        let diff = this.viewYaw - currentHeading;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
-        const newHeading = currentHeading + diff * Math.min(1, dt * 12);
+        const newHeading = currentHeading + diff * Math.min(1, dt * 10);
         this.vel.x = -Math.sin(newHeading) * postSpeed;
         this.vel.z = -Math.cos(newHeading) * postSpeed;
       }
 
       // Record Strafe Sync efficiency when turning or strafing in air
-      if (wishspeed > 0 || Math.abs(yawDelta) > 0.0005) {
+      if (airWishSpeed > 0 || Math.abs(yawDelta) > 0.0005) {
         const speedGain = postSpeed - prevSpeed;
         let sample = 0;
-        if (speedGain > 0.01 && cmd.fmove === 0 && cmd.smove !== 0) {
-          // Optimal air-strafe: turning mouse in sync with A/D while W is released
+        if (speedGain > 0.01 && cmd.smove !== 0) {
           const alignedTurn =
             (cmd.smove < 0 && yawDelta > 0) || (cmd.smove > 0 && yawDelta < 0);
           sample = alignedTurn ? Math.min(100, 78 + speedGain * 6.5) : 45;
@@ -424,7 +815,187 @@ export class PlayerPhysics {
     this.pos.y += this.vel.y * dt;
     this.pos.z += this.vel.z * dt;
 
-    // 6. Track Highway Boundaries & Floor / Obstacle Collision
+    // 6. Check active SurfRampCollider volumes (Smooth GoldSrc PM_ClipVelocity Supplementary Surfing)
+    const SURF_CONTACT_DIST = 4.0;
+    let onSteepSurfRamp = false;
+    for (const ramp of activeRamps) {
+      const rMinX = Math.min(ramp.minX, ramp.maxX);
+      const rMaxX = Math.max(ramp.minX, ramp.maxX);
+      const rMinY = Math.min(ramp.minY, ramp.maxY);
+      const rMaxY = Math.max(ramp.minY, ramp.maxY);
+      const rMinZ = Math.min(ramp.minZ, ramp.maxZ);
+      const rMaxZ = Math.max(ramp.minZ, ramp.maxZ);
+
+      if (
+        this.pos.x < rMinX - 8 ||
+        this.pos.x > rMaxX + 8 ||
+        this.pos.y + this.playerHeight < rMinY ||
+        this.pos.y > rMaxY + 4 ||
+        this.pos.z < rMinZ - 8 ||
+        this.pos.z > rMaxZ + 8
+      ) {
+        continue;
+      }
+
+      const nLen = Math.hypot(ramp.normal.x, ramp.normal.y, ramp.normal.z);
+      const nx = nLen > 0 ? ramp.normal.x / nLen : 0;
+      const ny = nLen > 0 ? ramp.normal.y / nLen : 1;
+      const nz = nLen > 0 ? ramp.normal.z / nLen : 0;
+
+      const dist =
+        this.pos.x * nx + this.pos.y * ny + this.pos.z * nz - ramp.planeConstant;
+
+      if (dist >= -16 && dist <= SURF_CONTACT_DIST) {
+        // Avoid grabbing players walking on the flat deck before they actually hit the slope
+        if (this.pos.y <= 0.5 && dist > 1.2 && !this.isSurfing) {
+          continue;
+        }
+
+        const velDotN = this.vel.x * nx + this.vel.y * ny + this.vel.z * nz;
+        // If moving decisively away from the ramp, let the player leave cleanly
+        if (velDotN > 35) {
+          continue;
+        }
+
+        if (dist < SURF_CONTACT_DIST) {
+          const pushDist = SURF_CONTACT_DIST - dist;
+          this.pos.x += nx * pushDist;
+          this.pos.y += ny * pushDist;
+          this.pos.z += nz * pushDist;
+        }
+
+        // Downslope Speed Slingshot: convert steep downward air drop into smooth forward momentum
+        if (this.vel.y < -120) {
+          const boost = Math.abs(this.vel.y) * 0.32;
+          const forwardX = -Math.sin(this.viewYaw);
+          const forwardZ = -Math.cos(this.viewYaw);
+          this.vel.x += forwardX * boost;
+          this.vel.z += forwardZ * boost;
+
+          const hSpeed = Math.hypot(this.vel.x, this.vel.z);
+          if (hSpeed > stats.maxBhopSpeed) {
+            const scale = stats.maxBhopSpeed / hSpeed;
+            this.vel.x *= scale;
+            this.vel.z *= scale;
+          }
+        }
+
+        // Velocity Projection (PM_ClipVelocity) along the ramp surface:
+        // Convert inward bank pressure into forward flow and keep vertical elevation stable on side banks
+        if (velDotN < 0) {
+          if (Math.abs(nx) > 0.35) {
+            const inwardSpeed = Math.abs(this.vel.x * nx);
+            const forwardX = -Math.sin(this.viewYaw);
+            const forwardZ = -Math.cos(this.viewYaw);
+            this.vel.x += forwardX * inwardSpeed * 0.25;
+            this.vel.z += forwardZ * inwardSpeed * 0.25;
+          }
+          PM_ClipVelocity(this.vel, { x: nx, y: ny, z: nz }, 1.0);
+        }
+
+        // Smooth vertical glide stabilization on side surf banks so surfing stays in the sweet spot
+        // without rocketing off the top lip or sliding down into the floor
+        if (Math.abs(nx) > 0.35) {
+          if (this.vel.y > 20 && !jumpedThisTick) {
+            this.vel.y *= 0.72;
+          } else if (this.vel.y < -12) {
+            this.vel.y *= 0.82;
+          }
+          // Keep player within the bank's active vertical band
+          const maxBankY = rMaxY - 18;
+          if (this.pos.y > maxBankY && this.vel.y > 0 && !jumpedThisTick) {
+            this.pos.y = maxBankY;
+            this.vel.y = 0;
+          }
+        }
+
+        // Apply optional forwardBoost along player heading
+        if (ramp.forwardBoost && ramp.forwardBoost > 0) {
+          const forwardX = -Math.sin(this.viewYaw);
+          const forwardZ = -Math.cos(this.viewYaw);
+          this.vel.x += forwardX * ramp.forwardBoost * dt;
+          this.vel.z += forwardZ * ramp.forwardBoost * dt;
+        }
+
+        if (ny < 0.75) {
+          this.grounded = false;
+          onSteepSurfRamp = true;
+          this.surfNormal = { x: nx, y: ny, z: nz };
+          this.remainingAirJumps = Math.max(1, this.remainingAirJumps);
+        }
+      }
+    }
+
+    this.isSurfing = onSteepSurfRamp;
+    if (onSteepSurfRamp) {
+      this.surfTicks++;
+      this.surfCoyoteTicks = 8;
+      if (!cmd.jumpHeld) {
+        this.hasRampJumped = false;
+      }
+    } else {
+      this.surfTicks = 0;
+      if (this.surfCoyoteTicks > 0) {
+        this.surfCoyoteTicks--;
+      } else {
+        this.hasRampJumped = false;
+      }
+    }
+
+    // 7. Auto-Step-Up Lip Forgiveness (sv_stepsize = 20) & Custom AABB Box Collision
+    let groundedNow = false;
+    if (activeBoxes.length > 0) {
+      const boxCol = this.resolveAABBCollisions(activeBoxes);
+      if (!this.alive) return;
+      if (boxCol.groundedOnBox) {
+        groundedNow = true;
+      }
+    }
+
+    // 7b. Player-to-Player Dynamic Cyber-Bumping (Active when strictCollisions is enabled)
+    if (this.strictCollisions && otherPlayers && otherPlayers.length > 0) {
+      for (const other of otherPlayers) {
+        if (!other || other.alive === false) continue;
+        const oRadius = other.radius ?? this.playerRadius;
+        const oHeight = other.height ?? this.playerHeight;
+        const combinedRadius = this.playerRadius + oRadius;
+
+        // Vertical overlap check
+        if (
+          this.pos.y + this.playerHeight > other.y &&
+          this.pos.y < other.y + oHeight
+        ) {
+          const dx = this.pos.x - other.x;
+          const dz = this.pos.z - other.z;
+          const distSq = dx * dx + dz * dz;
+
+          if (distSq < combinedRadius * combinedRadius && distSq > 0.0001) {
+            const dist = Math.sqrt(distSq);
+            const overlap = combinedRadius - dist;
+            const nx = dx / dist;
+            const nz = dz / dist;
+
+            // Separate local player along collision normal
+            this.pos.x += nx * overlap;
+            this.pos.z += nz * overlap;
+
+            // Elastic deflection
+            const relVx = this.vel.x - (other.vx ?? 0);
+            const relVz = this.vel.z - (other.vz ?? 0);
+            const normVel = relVx * nx + relVz * nz;
+
+            if (normVel < 0) {
+              const impulse = -1.35 * normVel;
+              this.vel.x += nx * impulse;
+              this.vel.z += nz * impulse;
+              this.callbacks.onPlayerBump?.(Math.abs(normVel));
+            }
+          }
+        }
+      }
+    }
+
+    // 8. Track Highway Boundaries & Floor / Obstacle Collision
     const enforceWalls = world && !(world as { flatTestMode?: boolean }).flatTestMode;
     if (enforceWalls) {
       const HIGHWAY_HALF_WIDTH = 600; // 1200 GoldSrc units wide total
@@ -438,7 +1009,6 @@ export class PlayerPhysics {
     }
 
     const floorY = world ? world.getFloorHeight(this.pos.x, this.pos.z) : 0;
-    let groundedNow = false;
 
     if (world) {
       const col = world.resolveCollisions(
@@ -452,16 +1022,21 @@ export class PlayerPhysics {
         this.callbacks.onHazardHit?.();
         return;
       }
-      if (col.groundedOnObstacle && this.vel.y <= 0) {
+      if (col.hitBoostPad) {
+        this.boostGraceTimer = 0.5; // 0.5s friction grace window to preserve catapult velocity
+        this.remainingAirJumps = Math.max(this.remainingAirJumps, 1);
+        this.callbacks.onBoost?.(this.ups);
+      }
+      if (col.groundedOnObstacle && this.vel.y <= 35) {
         this.pos.y = col.supportY;
-        this.vel.y = 0;
+        if (this.vel.y < 0) this.vel.y = 0;
         groundedNow = true;
       }
     }
 
-    if (!groundedNow && this.pos.y <= floorY && floorY > -500) {
+    if (!onSteepSurfRamp && !groundedNow && this.pos.y <= floorY && floorY > -500) {
       // Only snap to floor if player wasn't already deep below the deck in a chasm
-      if (this.prevPos.y >= floorY - 18 && this.vel.y <= 0) {
+      if (this.prevPos.y >= floorY - 20 && this.vel.y <= 0) {
         this.pos.y = floorY;
         this.vel.y = 0;
         groundedNow = true;
@@ -475,7 +1050,9 @@ export class PlayerPhysics {
       return;
     }
 
-    if (groundedNow) {
+    if (onSteepSurfRamp) {
+      this.grounded = false;
+    } else if (groundedNow) {
       this.grounded = true;
       this.remainingAirJumps = stats.extraJumps;
     } else if (this.pos.y > floorY + 0.5 || floorY <= -500) {

@@ -13,6 +13,8 @@
     "build": "tsc --noEmit && vite build",
     "start": "tsx server/index.ts",
     "preview": "vite preview --port 5173",
+    "test:physics": "tsx scripts/verify-physics.ts",
+    "snapshot": "tsx scripts/snapshot.ts",
     "test": "playwright test"
   },
   "dependencies": {

@@ -229,6 +229,17 @@
         background: rgba(0, 243, 255, 0.22);
       }
 
+      .ability-pill.interactive.comp-active {
+        border-color: var(--neon-magenta);
+        color: var(--neon-magenta);
+        background: rgba(255, 0, 127, 0.15);
+        box-shadow: 0 0 12px rgba(255, 0, 127, 0.35);
+      }
+
+      .ability-pill.interactive.comp-active:hover {
+        background: rgba(255, 0, 127, 0.3);
+      }
+
       /* Session Overlays: LOBBY, COUNTDOWN, PODIUM */
       .modal-panel {
         position: fixed;
@@ -876,7 +887,9 @@
         <b>A/D</b> + mouse turn!
       </div>
       <div id="lobby-players-list"></div>
-      <div class="modal-sub">SELECT PHASE-2 ROGUELIKE MODIFIER:</div>
+      <div class="modal-sub">TRACK MODE &amp; SOLID COLLISIONS:</div>
+      <button id="lobby-mode-toggle" class="cyber-btn" type="button" style="background: rgba(0, 243, 255, 0.12); border-color: var(--neon-cyan); margin-top: 4px;">MODE: FLOW (FORGIVING)</button>
+      <div class="modal-sub" style="margin-top: 6px;">SELECT PHASE-2 ROGUELIKE MODIFIER:</div>
       <div id="perk-cards-container" class="perk-grid"></div>
       <button id="start-match-btn" class="cyber-btn">START MATCH</button>
     </aside>
@@ -922,6 +935,9 @@
         >
         <span id="hud-cam-mode" class="ability-pill interactive"
           >CAM [V]: CHASE</span
+        >
+        <span id="hud-collision-toggle" class="ability-pill interactive"
+          >COLLISIONS [C]: FLOW</span
         >
       </div>
     </section>

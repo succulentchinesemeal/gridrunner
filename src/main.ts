@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { SynthAudio } from './audio/SynthAudio';
+import { parseLaunchConfig, VISUAL_THEME } from './config/GameConfig';
 import { InputManager } from './input/InputManager';
 import {
   MatchState,
@@ -13,11 +14,12 @@ import { GOLDSRC_DT, MoveCmd, PlayerPhysics } from './physics/PlayerPhysics';
 import { PlayerRig } from './renderer/PlayerRig';
 import { CameraMode, TronRenderer } from './renderer/TronRenderer';
 import { HudController } from './ui/HudController';
-import { TrackGenerator } from './world/TrackGenerator';
+import { TrackGenerator, TrackMode } from './world/TrackGenerator';
 
 export interface ExposedGameState {
   fps: number;
   cameraMode: CameraMode;
+  collisionsEnabled: boolean;
   localPlayer: {
     pos: { x: number; y: number; z: number };
     vel: { x: number; y: number; z: number };
@@ -26,6 +28,7 @@ export interface ExposedGameState {
     viewYaw: number;
     viewPitch: number;
     grounded: boolean;
+    isSurfing?: boolean;
     strafeSync: number;
     alive: boolean;
     distance: number;
@@ -50,6 +53,7 @@ export interface ExposedGameState {
     wallZ: number;
     wallSpeedUps: number;
     archetypes: string[];
+    mode?: TrackMode;
   };
   audioStats: {
     lastPlayedBhopFreq: number;
@@ -70,6 +74,9 @@ declare global {
       setCameraMode: (mode: CameraMode) => void;
       killLocalPlayer: () => void;
       cycleSpectatorTarget: (dir?: 1 | -1) => string | null;
+      setTrackMode?: (mode: TrackMode) => void;
+      toggleCollisions?: () => boolean;
+      setCollisions?: (enabled: boolean) => void;
     };
   }
 }
@@ -78,12 +85,20 @@ function bootstrap(): void {
   const container =
     document.getElementById('app-canvas-container') || document.body;
 
+  const launchConfig = parseLaunchConfig(window.location.search);
+  const requestedMode = launchConfig.mode;
+
   const renderer = new TronRenderer(container);
   const audio = new SynthAudio();
   const perkManager = new PerkManager(DEFAULT_GOLDSRC_STATS);
-  const track = new TrackGenerator(renderer.scene, 1337420);
+  const track = new TrackGenerator(
+    renderer.scene,
+    launchConfig.seed,
+    requestedMode
+  );
+  track.flatTestMode = launchConfig.flatTest;
 
-  const localRig = new PlayerRig(0x00f3ff);
+  const localRig = new PlayerRig(VISUAL_THEME.primaryCyan);
   localRig.attachToScene(renderer.scene);
 
   let spectatedPlayerId: string | null = null;
@@ -98,6 +113,8 @@ function bootstrap(): void {
     mouseDy: 0,
   };
 
+  let collisionsEnabled = requestedMode === 'COMPETITIVE';
+
   const physics = new PlayerPhysics(perkManager, {
     onJump: (ups, _isBhop, isDoubleJump) => {
       audio.playBhopTick(ups, isDoubleJump);
@@ -107,10 +124,44 @@ function bootstrap(): void {
       audio.playDash();
       localRig.triggerDashAnim();
     },
+    onBoost: (ups) => {
+      audio.playBoost(ups);
+      renderer.triggerBoostFx(ups);
+      localRig.triggerDashAnim();
+    },
     onHazardHit: () => {
       audio.playDerezz();
     },
+    onPlayerBump: (relSpeed) => {
+      audio.playPlayerBump(relSpeed);
+    },
   });
+  physics.strictCollisions = collisionsEnabled;
+  track.strictCollisions = collisionsEnabled;
+
+  const applyCollisions = (enabled: boolean, switchTrackMode = true) => {
+    collisionsEnabled = enabled;
+    physics.strictCollisions = enabled;
+    track.strictCollisions = enabled;
+    if (switchTrackMode) {
+      const targetMode: TrackMode = enabled ? 'COMPETITIVE' : 'FLOW';
+      track.setTrackMode(targetMode);
+    }
+    hud.setCollisionsLabel(collisionsEnabled, track.trackMode);
+    syncWindowState();
+  };
+
+  const toggleCollisions = (): boolean => {
+    const next = !collisionsEnabled;
+    applyCollisions(next, true);
+    audio.playToggle(next);
+    hud.showActionBanner(
+      next
+        ? '⚔️ SOLID COLLISIONS ENABLED — PLATFORMS & RUNNERS ARE SOLID!'
+        : '🌊 FLOW MODE ENABLED — FORGIVING ONE-WAY PLATFORMS'
+    );
+    return next;
+  };
 
   const applyCameraMode = (mode: CameraMode) => {
     renderer.setCameraMode(mode);
@@ -194,7 +245,8 @@ function bootstrap(): void {
     () => audio.unlock(),
     () => toggleCameraMode(),
     (dir) => cycleSpectatorTarget(dir),
-    () => !physics.alive && network.getAliveRemoteEntities().length > 0
+    () => !physics.alive && network.getAliveRemoteEntities().length > 0,
+    () => toggleCollisions()
   );
 
   const network = new NetworkClient(renderer.scene, {
@@ -231,8 +283,10 @@ function bootstrap(): void {
     () => network.requestStartMatch(false),
     () => network.requestStartMatch(false),
     () => toggleCameraMode(),
-    (dir) => cycleSpectatorTarget(dir)
+    (dir) => cycleSpectatorTarget(dir),
+    () => toggleCollisions()
   );
+  hud.setCollisionsLabel(collisionsEnabled, track.trackMode);
 
   // FPS counter smoothing
   let smoothedFps = 60;
@@ -275,6 +329,7 @@ function bootstrap(): void {
     window.__GAME_STATE__ = {
       fps: Math.round(smoothedFps),
       cameraMode: renderer.cameraMode,
+      collisionsEnabled: collisionsEnabled,
       localPlayer: {
         pos: {
           x: physics.pos.x,
@@ -291,6 +346,7 @@ function bootstrap(): void {
         viewYaw: physics.viewYaw,
         viewPitch: input.viewPitch,
         grounded: physics.grounded,
+        isSurfing: physics.isSurfing,
         strafeSync: physics.strafeSync,
         alive: physics.alive,
         distance: physics.distance,
@@ -321,6 +377,7 @@ function bootstrap(): void {
         wallZ: track.wallZ,
         wallSpeedUps: track.wallSpeedUps,
         archetypes: track.getActiveArchetypes(),
+        mode: track.trackMode,
       },
       audioStats: {
         lastPlayedBhopFreq: audio.lastPlayedBhopFreq,
@@ -353,8 +410,25 @@ function bootstrap(): void {
       }
     },
     stepPhysicsTicks: (ticks, cmd) => {
+      const aliveRemotes = network.getAliveRemoteEntities().map((e) => ({
+        id: e.snapshot.id,
+        x: e.renderPos.x,
+        y: e.renderPos.y,
+        z: e.renderPos.z,
+        vx: e.renderVel.x,
+        vy: e.renderVel.y,
+        vz: e.renderVel.z,
+        alive: e.snapshot.alive,
+      }));
       for (let i = 0; i < ticks; i++) {
-        physics.stepTick(cmd, GOLDSRC_DT, track);
+        physics.stepTick(
+          cmd,
+          GOLDSRC_DT,
+          track,
+          track.getActiveSurfRamps(physics.pos.z),
+          undefined,
+          aliveRemotes
+        );
         localMatchElapsed += GOLDSRC_DT;
         track.updateAroundPlayerZ(physics.pos.z, localMatchElapsed, GOLDSRC_DT);
       }
@@ -407,7 +481,25 @@ function bootstrap(): void {
     cycleSpectatorTarget: (dir: 1 | -1 = 1) => {
       return cycleSpectatorTarget(dir);
     },
+    setTrackMode: (mode: TrackMode) => {
+      track.setTrackMode(mode);
+      applyCollisions(mode === 'COMPETITIVE', false);
+      syncWindowState();
+    },
+    toggleCollisions: () => {
+      return toggleCollisions();
+    },
+    setCollisions: (enabled: boolean) => {
+      applyCollisions(enabled, true);
+    },
   };
+
+  if (launchConfig.camera !== 'CHASE') {
+    applyCameraMode(launchConfig.camera);
+  }
+  if (launchConfig.autostart) {
+    network.requestStartMatch(true, launchConfig.seed);
+  }
 
   // Initialize state immediately before first animation frame
   syncWindowState();
@@ -450,7 +542,24 @@ function bootstrap(): void {
     };
     if (canMove && physics.alive) {
       lastCmd = input.sampleMoveCmd(physics.stats.sv_maxspeed);
-      alpha = physics.update(rawDt, lastCmd, track);
+      const aliveRemotes = network.getAliveRemoteEntities().map((e) => ({
+        id: e.snapshot.id,
+        x: e.renderPos.x,
+        y: e.renderPos.y,
+        z: e.renderPos.z,
+        vx: e.renderVel.x,
+        vy: e.renderVel.y,
+        vz: e.renderVel.z,
+        alive: e.snapshot.alive,
+      }));
+      alpha = physics.update(
+        rawDt,
+        lastCmd,
+        track,
+        track.getActiveSurfRamps(physics.pos.z),
+        undefined,
+        aliveRemotes
+      );
       localMatchElapsed += rawDt;
       const isDashing =
         physics.dashCooldownTimer > physics.stats.dashCooldown - 0.3;
@@ -547,6 +656,8 @@ function bootstrap(): void {
           fmove: lastCmd.fmove,
           isDashing:
             physics.dashCooldownTimer > physics.stats.dashCooldown - 0.3,
+          isSurfing: physics.isSurfing,
+          surfRampAngle: physics.surfRampAngle,
         }
       );
       renderer.updateCamera(
@@ -560,6 +671,13 @@ function bootstrap(): void {
         physics.grounded
       );
     }
+
+    const activeUps = spec.active && spec.entity
+      ? spec.entity.snapshot.ups
+      : physics.alive
+      ? physics.ups
+      : 0;
+    audio.updateSpeedLoop(activeUps, rawDt);
 
     hud.update(
       physics,

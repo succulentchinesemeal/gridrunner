@@ -34,6 +34,9 @@ export class HudController {
   private dangerVignetteEl: HTMLElement | null;
   private actionPromptBannerEl: HTMLElement | null;
   private camModeEl: HTMLElement | null;
+  private collisionToggleEl: HTMLElement | null;
+  private lobbyModeToggleBtn: HTMLElement | null;
+  private promptTimer: number | null = null;
 
   // Spectator & Input/Cursor Telemetry HUD Elements
   private spectatorPanelEl: HTMLElement | null;
@@ -56,7 +59,8 @@ export class HudController {
     onStartMatchClick: () => void,
     onRematchClick: () => void,
     onToggleCameraMode?: () => void,
-    onCycleSpectator?: (dir: 1 | -1) => void
+    onCycleSpectator?: (dir: 1 | -1) => void,
+    onToggleCollisions?: () => void
   ) {
     this.upsValueEl = document.getElementById('hud-ups-value');
     this.upsUnitEl = document.getElementById('hud-ups-unit');
@@ -76,6 +80,8 @@ export class HudController {
     this.dangerVignetteEl = document.getElementById('laser-danger-vignette');
     this.actionPromptBannerEl = document.getElementById('action-prompt-banner');
     this.camModeEl = document.getElementById('hud-cam-mode');
+    this.collisionToggleEl = document.getElementById('hud-collision-toggle');
+    this.lobbyModeToggleBtn = document.getElementById('lobby-mode-toggle');
 
     this.spectatorPanelEl = document.getElementById('spectator-panel');
     this.spectatorTargetNameEl = document.getElementById(
@@ -109,6 +115,16 @@ export class HudController {
     this.camModeEl?.addEventListener('click', (e) => {
       e.stopPropagation();
       onToggleCameraMode?.();
+    });
+
+    this.collisionToggleEl?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onToggleCollisions?.();
+    });
+
+    this.lobbyModeToggleBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onToggleCollisions?.();
     });
 
     const startBtn = document.getElementById('start-match-btn');
@@ -191,6 +207,51 @@ export class HudController {
       const label = mode === 'FIRST_PERSON' ? '1ST PERSON' : mode;
       this.camModeEl.textContent = `CAM [V]: ${label}`;
     }
+  }
+
+  public setCollisionsLabel(enabled: boolean, mode?: string): void {
+    const isComp = mode === 'COMPETITIVE' || enabled;
+    if (this.collisionToggleEl) {
+      this.collisionToggleEl.textContent = isComp
+        ? 'COLLISIONS [C]: SOLID'
+        : 'COLLISIONS [C]: FLOW';
+      if (isComp) {
+        this.collisionToggleEl.classList.add('comp-active');
+      } else {
+        this.collisionToggleEl.classList.remove('comp-active');
+      }
+    }
+    if (this.lobbyModeToggleBtn) {
+      this.lobbyModeToggleBtn.textContent = isComp
+        ? 'MODE: COMPETITIVE (SOLID COLLISIONS)'
+        : 'MODE: FLOW (FORGIVING)';
+      if (isComp) {
+        this.lobbyModeToggleBtn.style.borderColor = 'var(--neon-magenta)';
+        this.lobbyModeToggleBtn.style.color = 'var(--neon-magenta)';
+        this.lobbyModeToggleBtn.style.background = 'rgba(255, 0, 127, 0.15)';
+      } else {
+        this.lobbyModeToggleBtn.style.borderColor = 'var(--neon-cyan)';
+        this.lobbyModeToggleBtn.style.color = 'var(--neon-cyan)';
+        this.lobbyModeToggleBtn.style.background = 'rgba(0, 243, 255, 0.12)';
+      }
+    }
+  }
+
+  public showActionBanner(text: string, durationMs = 2800): void {
+    if (!this.actionPromptBannerEl) return;
+    this.actionPromptBannerEl.textContent = text;
+    this.actionPromptBannerEl.style.opacity = '1';
+    this.actionPromptBannerEl.style.transform = 'translateX(-50%) translateY(0)';
+    if (this.promptTimer !== null) {
+      window.clearTimeout(this.promptTimer);
+    }
+    this.promptTimer = window.setTimeout(() => {
+      if (this.actionPromptBannerEl) {
+        this.actionPromptBannerEl.style.opacity = '0.9';
+        this.actionPromptBannerEl.textContent =
+          '⚡ HOLD [W] TO SPRINT — [SPACE] + STRAFE [A/D] TO BHOP — [C] TOGGLE SOLID COLLISIONS';
+      }
+    }, durationMs);
   }
 
   public update(
