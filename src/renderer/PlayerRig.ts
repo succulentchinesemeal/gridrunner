@@ -1,7 +1,15 @@
 import * as THREE from 'three';
 
 const TRAIL_SEGMENTS = 44;
-const TRAIL_HALF_WIDTH = 7;
+const TRAIL_HALF_WIDTH = 13.5;
+const TAIL_SEGMENT_COUNT = 6;
+const TAIL_PHASE_DELAY_SEC = 0.025; // 25ms phase offset per vertebra
+const SHOCKWAVE_POOL_SIZE = 4;
+const SHOCKWAVE_DURATION_SEC = 0.22; // 220ms burst duration
+const WING_BASE_OFFSET_X = 7.0; // Float 7 units to the left and right of central core
+const MAX_CARVE_BANK_RAD = 0.95; // ±0.95 radians (±55°)
+const SPRING_STIFFNESS = 180;
+const SPRING_DAMPING = 14;
 
 export interface AcrobatAnimInput {
   grounded: boolean;
@@ -11,56 +19,174 @@ export interface AcrobatAnimInput {
   smove: number; // < 0 for A (left), > 0 for D (right)
   fmove: number;
   isDashing: boolean;
+  isSurfing?: boolean;
+  surfRampAngle?: number;
+}
+
+export function shortestAngleDiff(currentYaw: number, prevYaw: number): number {
+  let diff = currentYaw - prevYaw;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return diff;
+}
+
+function wrapAngle(angle: number): number {
+  let a = angle;
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+/**
+ * Reusable 2nd-Order Damped Spring Helper Class
+ * (stiffness = 180, damping = 14)
+ */
+export class SpringValue {
+  value = 0;
+  vel = 0;
+
+  constructor(initialValue = 0) {
+    this.value = initialValue;
+  }
+
+  reset(val = 0): void {
+    this.value = val;
+    this.vel = 0;
+  }
+
+  update(target: number, stiffness: number, damping: number, dt: number): number {
+    const force = (target - this.value) * stiffness;
+    this.vel = (this.vel + force * dt) * Math.exp(-damping * dt);
+    this.value += this.vel * dt;
+    return this.value;
+  }
+
+  impulse(amount: number): void {
+    this.vel += amount;
+  }
+}
+
+interface SpinePoseSample {
+  time: number;
+  pitch: number;
+  yaw: number;
+  yawRate: number;
+  roll: number;
+  heave: number;
+}
+
+interface ShockwaveRingSlot {
+  mesh: THREE.Mesh;
+  material: THREE.MeshBasicMaterial;
+  active: boolean;
+  elapsed: number;
 }
 
 export class PlayerRig {
   public readonly group = new THREE.Group();
 
-  // Articulated Digital Cyber-Acrobat Skeleton Hierarchy
-  private characterRoot = new THREE.Group();
-  private pelvis = new THREE.Group();
-  private spine = new THREE.Group();
-  private headGroup = new THREE.Group();
-  private scarfLeft = new THREE.Group();
-  private scarfRight = new THREE.Group();
+  // Aero-Core Glider Hierarchy
+  private gliderRoot = new THREE.Group();
+  public readonly coreGroup = new THREE.Group();
+  private fuselageGroup: THREE.Group;
+  private gyroRingOuter!: THREE.Mesh;
+  private gyroRingInner!: THREE.Mesh;
+  private reactorCoreMesh!: THREE.Mesh;
+  private thrusterNozzleGroup = new THREE.Group();
+  private thrusterPlumeMesh!: THREE.Mesh;
 
-  private leftShoulder = new THREE.Group();
-  private leftElbow = new THREE.Group();
-  private rightShoulder = new THREE.Group();
-  private rightElbow = new THREE.Group();
+  // Detached Magnetic Wing-Blades (floating ±7 units from central core)
+  private wingOrbitGroup = new THREE.Group();
+  public readonly leftWing = new THREE.Group();
+  public readonly rightWing = new THREE.Group();
+  private leftWingPivot: THREE.Group;
+  private rightWingPivot: THREE.Group;
 
-  private leftHip = new THREE.Group();
-  private leftKnee = new THREE.Group();
-  private rightHip = new THREE.Group();
-  private rightKnee = new THREE.Group();
+  // Articulated 6-Segment Kinetic Spine/Tail
+  private tailRoot = new THREE.Group();
+  private tailSegments: THREE.Group[] = [];
+  private spineHistory: SpinePoseSample[] = [];
+  private simTime = 0;
 
-  // Procedural Animation State
-  private runCycle = 0;
-  private smoothLeanX = 0; // Forward/back pitch lean
-  private smoothLeanZ = 0; // Lateral strafe bank
-  private smoothTwistY = 0; // Torso counter-yaw into strafe
-  private landingSquash = 0; // Knee compression spring on landing/jump
-  private flipAngle = 0; // 360-degree aerial somersault on double jump
-  private dashPulse = 0; // Boost pose blend
-  private wasGrounded = true;
+  // Materials for dynamic color assignment & shader uniforms
+  private playerColor = new THREE.Color(0x00f3ff);
+  private rimColorUniform = { value: new THREE.Color(0x00f3ff) };
+  private darkArmorMat!: THREE.MeshStandardMaterial;
+  private neonCoreMat!: THREE.MeshStandardMaterial;
+  private thrusterPlumeMat!: THREE.MeshBasicMaterial;
+
+  // 2nd-Order Spring Solvers (stiffness = 180, damping = 14)
+  public readonly rollSpring = new SpringValue(0);
+  public readonly pitchSpring = new SpringValue(0);
+  public readonly yawCarveSpring = new SpringValue(0);
+  public readonly bodyHeaveSpring = new SpringValue(0);
+  public readonly wingSpreadSpring = new SpringValue(0);
+  public readonly wingVerticalSpring = new SpringValue(0);
+  public readonly orbitalAngleSpring = new SpringValue(0);
+  public readonly dashSnapSpring = new SpringValue(0);
+
+  // Motion & Action State
+  private prevViewYaw = 0;
   private smoothHeadingYaw = 0;
+  private initializedYaw = false;
+  private wasGrounded = true;
+  public orbitalAngle = 0;
+  private dashTimer = 0;
+  private lastKnownUps = 0;
+  private lastShockwaveTime = -1;
 
-  // Dual Ribbon Trails (from shoulders/scarf)
+  // Wing-Tip Plasma Wake Ribbon Trail
   private trailGeometry: THREE.BufferGeometry;
   private trailPositions: Float32Array;
+  private trailUvs: Float32Array;
+  private trailMaterial: THREE.ShaderMaterial;
   private trailMesh: THREE.Mesh;
-  private history: Array<{ x: number; y: number; z: number; yaw: number }> = [];
+  private history: Array<{
+    x: number;
+    y: number;
+    z: number;
+    yaw: number;
+    roll: number;
+  }> = [];
+
+  // Pool of 4 Bhop Shockwave Rings at floor level (y = 1.0)
+  private shockwaveGroup = new THREE.Group();
+  private shockwavePool: ShockwaveRingSlot[] = [];
+  private shockwaveCursor = 0;
+  private sharedShockwaveGeo: THREE.RingGeometry;
 
   constructor(colorHex: number = 0x00f3ff) {
-    this.buildCyberAcrobat(colorHex);
-    this.group.add(this.characterRoot);
+    this.playerColor.setHex(colorHex);
+    this.rimColorUniform.value.setHex(colorHex);
 
-    // Build BufferGeometry ring buffer ribbon trail
+    this.fuselageGroup = this.coreGroup;
+    this.leftWingPivot = this.leftWing;
+    this.rightWingPivot = this.rightWing;
+
+    this.buildAeroCoreGlider(colorHex);
+    this.group.add(this.gliderRoot);
+
+    // Build UV-faded Additive Plasma Wake Ribbon Trail (44 segments)
     this.trailGeometry = new THREE.BufferGeometry();
     this.trailPositions = new Float32Array(TRAIL_SEGMENTS * 2 * 3);
+    this.trailUvs = new Float32Array(TRAIL_SEGMENTS * 2 * 2);
+
+    for (let i = 0; i < TRAIL_SEGMENTS; i++) {
+      const u = i / (TRAIL_SEGMENTS - 1);
+      const uvIdx = i * 4;
+      this.trailUvs[uvIdx] = u;
+      this.trailUvs[uvIdx + 1] = 0;
+      this.trailUvs[uvIdx + 2] = u;
+      this.trailUvs[uvIdx + 3] = 1;
+    }
+
     this.trailGeometry.setAttribute(
       'position',
       new THREE.BufferAttribute(this.trailPositions, 3)
+    );
+    this.trailGeometry.setAttribute(
+      'uv',
+      new THREE.BufferAttribute(this.trailUvs, 2)
     );
 
     const indices: number[] = [];
@@ -73,191 +199,454 @@ export class PlayerRig {
     }
     this.trailGeometry.setIndex(indices);
 
-    const trailMat = new THREE.MeshBasicMaterial({
-      color: colorHex,
+    this.trailMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(colorHex) },
+        uOpacity: { value: 0.8 },
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uColor;
+        uniform float uOpacity;
+        varying vec2 vUv;
+        void main() {
+          // Smooth UV alpha fade: pow(1.0 - vUv.x, 1.8)
+          float lengthFade = pow(max(0.0, 1.0 - vUv.x), 1.8);
+          // Bright core glow across ribbon width
+          float edgeDist = abs(vUv.y - 0.5) * 2.0;
+          float coreGlow = exp(-edgeDist * edgeDist * 6.0);
+          float wingFilaments = smoothstep(0.68, 0.95, edgeDist);
+          float crossProfile = max(coreGlow * 1.25, wingFilaments * 0.9);
+
+          float alpha = lengthFade * crossProfile * uOpacity;
+          if (alpha < 0.003) discard;
+
+          vec3 glowColor = mix(uColor, vec3(1.0), coreGlow * 0.85);
+          gl_FragColor = vec4(glowColor, alpha);
+        }
+      `,
       transparent: true,
-      opacity: 0.48,
-      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
       depthWrite: false,
+      side: THREE.DoubleSide,
     });
 
-    this.trailMesh = new THREE.Mesh(this.trailGeometry, trailMat);
+    this.trailMesh = new THREE.Mesh(this.trailGeometry, this.trailMaterial);
     this.trailMesh.frustumCulled = false;
+
+    // Pre-allocate a pool of 4 flat ring meshes (THREE.RingGeometry(3, 4.5, 32)) per rig
+    this.sharedShockwaveGeo = new THREE.RingGeometry(3, 4.5, 32);
+    this.sharedShockwaveGeo.rotateX(-Math.PI / 2);
+
+    for (let i = 0; i < SHOCKWAVE_POOL_SIZE; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: colorHex,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(this.sharedShockwaveGeo, mat);
+      mesh.visible = false;
+      mesh.position.y = 1.0;
+      this.shockwaveGroup.add(mesh);
+      this.shockwavePool.push({
+        mesh,
+        material: mat,
+        active: false,
+        elapsed: 0,
+      });
+    }
   }
 
   public attachToScene(scene: THREE.Scene): void {
     scene.add(this.group);
     scene.add(this.trailMesh);
+    scene.add(this.shockwaveGroup);
   }
 
   public setVisible(visible: boolean): void {
     this.group.visible = visible;
     this.trailMesh.visible = visible;
+    this.shockwaveGroup.visible = visible;
   }
 
   public detachFromScene(scene: THREE.Scene): void {
     scene.remove(this.group);
     scene.remove(this.trailMesh);
+    scene.remove(this.shockwaveGroup);
     this.trailGeometry.dispose();
+    this.trailMaterial.dispose();
+    this.sharedShockwaveGeo.dispose();
   }
 
-  /**
-   * Triggers a crisp acrobatic impulse animation on jump, double-jump, or conc-dash
-   */
-  public triggerJumpAnim(isDoubleJump: boolean): void {
-    this.landingSquash = 0.65;
-    if (isDoubleJump) {
-      this.flipAngle = Math.PI * 2; // Full 360° aerial front-tuck flip
+  public setColor(colorHex: number): void {
+    this.playerColor.setHex(colorHex);
+    this.rimColorUniform.value.setHex(colorHex);
+    this.neonCoreMat.color.setHex(colorHex);
+    this.neonCoreMat.emissive.setHex(colorHex);
+    this.thrusterPlumeMat.color.setHex(colorHex);
+    this.trailMaterial.uniforms.uColor.value.setHex(colorHex);
+    for (const slot of this.shockwavePool) {
+      slot.material.color.setHex(colorHex);
     }
   }
 
-  public triggerDashAnim(): void {
-    this.dashPulse = 1.0;
+  public setPosition(pos: THREE.Vector3): void {
+    this.group.position.copy(pos);
   }
 
-  private buildCyberAcrobat(colorHex: number): void {
-    const darkArmorMat = new THREE.MeshStandardMaterial({
-      color: 0x0b1328,
-      roughness: 0.25,
-      metalness: 0.85,
+  public setYaw(yaw: number): void {
+    this.smoothHeadingYaw = yaw;
+    this.group.rotation.y = yaw;
+  }
+
+  /**
+   * Triggers a crisp impulse animation on jump, bhop, or double-jump vortex
+   */
+  public triggerJumpAnim(isDoubleJump: boolean): void {
+    // Bhop Squash & Rebound: impulse wingSpreadSpring(140) and wingVerticalSpring(-160)
+    this.wingSpreadSpring.impulse(140);
+    this.wingVerticalSpring.impulse(-160);
+    this.bodyHeaveSpring.impulse(-40);
+
+    if (isDoubleJump) {
+      // Orbital barrel roll 360° on mid-air double jump
+      this.orbitalAngle += 2 * Math.PI;
+    } else if (this.lastKnownUps > 450) {
+      this.spawnBhopShockwave(this.group.position.x, this.group.position.z, this.group.position.y);
+    }
+  }
+
+  /**
+   * Pulls magnetic wings tight against fuselage into a supersonic delta-dart and flares thruster for 300ms
+   */
+  public triggerDashAnim(): void {
+    this.dashTimer = 0.30;
+    this.dashSnapSpring.impulse(12.0);
+    this.pitchSpring.impulse(-0.15);
+  }
+
+  private spawnBhopShockwave(x: number, z: number, y: number = 1.0): void {
+    if (this.simTime - this.lastShockwaveTime < 0.04) return;
+    this.lastShockwaveTime = this.simTime;
+
+    const slot = this.shockwavePool[this.shockwaveCursor];
+    this.shockwaveCursor = (this.shockwaveCursor + 1) % SHOCKWAVE_POOL_SIZE;
+
+    slot.active = true;
+    slot.elapsed = 0;
+    slot.mesh.visible = true;
+    slot.mesh.position.set(x, Math.max(1.0, y), z);
+    slot.mesh.scale.set(1, 1, 1);
+    slot.material.opacity = 0.9;
+  }
+
+  private buildAeroCoreGlider(colorHex: number): void {
+    // 1. Fresnel Rim-Lit PBR Dark Titanium Armor Material (refined matte-composite roughness: 0.45, metalness: 0.55)
+    this.darkArmorMat = new THREE.MeshStandardMaterial({
+      color: 0x0c1424,
+      roughness: 0.45,
+      metalness: 0.55,
       emissive: colorHex,
-      emissiveIntensity: 0.22,
+      emissiveIntensity: 0.08,
     });
 
-    const neonCoreMat = new THREE.MeshStandardMaterial({
+    this.darkArmorMat.onBeforeCompile = (shader) => {
+      shader.uniforms.uRimColor = this.rimColorUniform;
+      shader.fragmentShader =
+        `uniform vec3 uRimColor;\n` + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        /* glsl */ `
+        #include <emissivemap_fragment>
+        vec3 fresnelViewDir = normalize(vViewPosition);
+        float fresnelFactor = pow(1.0 - abs(dot(normal, fresnelViewDir)), 3.2) * 1.15;
+        totalEmissiveRadiance += uRimColor * fresnelFactor;
+        `
+      );
+    };
+    this.darkArmorMat.customProgramCacheKey = () => 'aero-core-fresnel-armor-v2';
+
+    // 2. High-Tech Gyro-Reactor & Plasma Edge Material (refined emissiveIntensity: 1.35)
+    this.neonCoreMat = new THREE.MeshStandardMaterial({
       color: colorHex,
       emissive: colorHex,
       emissiveIntensity: 1.35,
-      roughness: 0.15,
-      metalness: 0.5,
+      roughness: 0.28,
+      metalness: 0.20,
     });
 
-    const visorMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
+    this.thrusterPlumeMat = new THREE.MeshBasicMaterial({
+      color: colorHex,
+      transparent: true,
+      opacity: 0.88,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
     });
 
-    const makeLimb = (
-      w: number,
-      h: number,
-      d: number,
-      yOffset: number,
-      isNeon = false
-    ): THREE.Mesh => {
-      const geo = new THREE.BoxGeometry(w, h, d);
-      const mesh = new THREE.Mesh(geo, isNeon ? neonCoreMat : darkArmorMat);
-      mesh.position.y = yOffset;
+    // Hover height above deck
+    this.gliderRoot.position.set(0, 24, 0);
+    this.gliderRoot.add(this.fuselageGroup);
 
-      const edgeGeo = new THREE.EdgesGeometry(geo);
-      const edgeMat = new THREE.LineBasicMaterial({
-        color: colorHex,
-        transparent: true,
-        opacity: 0.65,
-      });
-      mesh.add(new THREE.LineSegments(edgeGeo, edgeMat));
-      return mesh;
+    // ============================================================================
+    // A. CENTRAL STEALTH FUSELAGE & EXPOSED GYRO-REACTOR (Beveled ExtrudeGeometry)
+    // ============================================================================
+    const hullShape = new THREE.Shape();
+    // 2D planform in (x, y) where +y maps to -z (forward nose) after rotateX(-PI/2)
+    hullShape.moveTo(0, 19.5); // Razor stealth nose tip (z = -19.5)
+    hullShape.lineTo(3.4, 10.5); // Forward chine
+    hullShape.lineTo(6.2, 3.2); // Forward intake shoulder
+    hullShape.lineTo(5.2, -3.5); // Mid-body reactor waist
+    hullShape.lineTo(6.0, -9.5); // Rear engine cowling flare
+    hullShape.lineTo(3.6, -13.5); // Exhaust shroud corner
+    hullShape.lineTo(1.8, -12.2); // Exhaust recess
+    hullShape.lineTo(-1.8, -12.2);
+    hullShape.lineTo(-3.6, -13.5);
+    hullShape.lineTo(-6.0, -9.5);
+    hullShape.lineTo(-5.2, -3.5);
+    hullShape.lineTo(-6.2, 3.2);
+    hullShape.lineTo(-3.4, 10.5);
+    hullShape.closePath();
+
+    // Octagonal central reactor bay cutout so the spinning gyro-core is exposed
+    const bayHole = new THREE.Path();
+    const bayRadius = 3.5;
+    for (let i = 0; i < 8; i++) {
+      const angle = (i / 8) * Math.PI * 2 + Math.PI / 8;
+      const hx = Math.cos(angle) * bayRadius;
+      const hy = Math.sin(angle) * bayRadius - 0.5;
+      if (i === 0) bayHole.moveTo(hx, hy);
+      else bayHole.lineTo(hx, hy);
+    }
+    bayHole.closePath();
+    hullShape.holes.push(bayHole);
+
+    const hullExtrudeSettings: THREE.ExtrudeGeometryOptions = {
+      depth: 2.2,
+      bevelEnabled: true,
+      bevelThickness: 1.2,
+      bevelSize: 1.0,
+      bevelSegments: 2,
+      curveSegments: 8,
     };
 
-    // 1. Pelvis (Root at hip height y = 26)
-    this.pelvis.position.set(0, 26, 0);
-    this.characterRoot.add(this.pelvis);
-    const pelvisMesh = makeLimb(9, 4.5, 6, 0);
-    this.pelvis.add(pelvisMesh);
+    const hullGeo = new THREE.ExtrudeGeometry(hullShape, hullExtrudeSettings);
+    hullGeo.rotateX(-Math.PI / 2);
+    hullGeo.translate(0, -1.1, 0);
+    const hullMesh = new THREE.Mesh(hullGeo, this.darkArmorMat);
+    this.fuselageGroup.add(hullMesh);
 
-    // 2. Spine & Athletic Torso
-    this.spine.position.set(0, 2.5, 0);
-    this.pelvis.add(this.spine);
+    // Forward Dorsal Cockpit Canopy Fin (Beveled Side-Profile Extrusion)
+    const canopyShape = new THREE.Shape();
+    canopyShape.moveTo(-17.0, 0.4); // Forward nose bridge
+    canopyShape.lineTo(-7.5, 3.3); // Cockpit crown
+    canopyShape.lineTo(-3.6, 2.2); // Reactor bay forward rim
+    canopyShape.lineTo(-4.4, 0.2);
+    canopyShape.closePath();
 
-    const abdomenMesh = makeLimb(8, 6, 5.5, 3.5);
-    this.spine.add(abdomenMesh);
+    const canopyGeo = new THREE.ExtrudeGeometry(canopyShape, {
+      depth: 2.4,
+      bevelEnabled: true,
+      bevelThickness: 0.9,
+      bevelSize: 0.75,
+      bevelSegments: 2,
+    });
+    canopyGeo.rotateY(Math.PI / 2); // Map 2D x -> -z, y -> +y, depth -> x
+    canopyGeo.translate(-1.2, 0.5, 0);
+    const canopyMesh = new THREE.Mesh(canopyGeo, this.darkArmorMat);
+    this.fuselageGroup.add(canopyMesh);
 
-    const chestMesh = makeLimb(11.5, 8.5, 7, 10.5);
-    this.spine.add(chestMesh);
+    // Exposed Spinning Inner Energy Core & Dual Gyroscope Rings (emissiveIntensity: 3.2)
+    const coreGeo = new THREE.OctahedronGeometry(2.15, 1);
+    this.reactorCoreMesh = new THREE.Mesh(coreGeo, this.neonCoreMat);
+    this.reactorCoreMesh.position.set(0, 0.2, 0.5);
+    this.fuselageGroup.add(this.reactorCoreMesh);
 
-    // Glowing Cyber Spine & Core Reactor
-    const spineCore = makeLimb(3.2, 11, 7.6, 8.5, true);
-    this.spine.add(spineCore);
+    const outerGyroGeo = new THREE.TorusGeometry(3.35, 0.36, 10, 28);
+    this.gyroRingOuter = new THREE.Mesh(outerGyroGeo, this.neonCoreMat);
+    this.gyroRingOuter.position.set(0, 0.2, 0.5);
+    this.fuselageGroup.add(this.gyroRingOuter);
 
-    // 3. Head & Sleek Aero Helmet + Visor + Energy Scarf
-    this.headGroup.position.set(0, 16.5, 0);
-    this.spine.add(this.headGroup);
+    const innerGyroGeo = new THREE.TorusGeometry(2.55, 0.26, 8, 24);
+    this.gyroRingInner = new THREE.Mesh(innerGyroGeo, this.neonCoreMat);
+    this.gyroRingInner.position.set(0, 0.2, 0.5);
+    this.fuselageGroup.add(this.gyroRingInner);
 
-    const helmetGeo = new THREE.OctahedronGeometry(4.6, 1);
-    helmetGeo.scale(0.88, 1.05, 1.25);
-    const helmetMesh = new THREE.Mesh(helmetGeo, darkArmorMat);
-    helmetMesh.position.y = 3.2;
-    this.headGroup.add(helmetMesh);
+    // Main Rear Thruster Nozzle & Afterburner Cone
+    this.thrusterNozzleGroup.position.set(0, 0, 12.8);
+    this.fuselageGroup.add(this.thrusterNozzleGroup);
 
-    const visorGeo = new THREE.BoxGeometry(6.8, 1.8, 5.2);
-    const visorMesh = new THREE.Mesh(visorGeo, visorMat);
-    visorMesh.position.set(0, 3.5, -2.2);
-    this.headGroup.add(visorMesh);
+    const nozzleRingGeo = new THREE.TorusGeometry(2.1, 0.42, 10, 24);
+    const nozzleRingMesh = new THREE.Mesh(nozzleRingGeo, this.neonCoreMat);
+    this.thrusterNozzleGroup.add(nozzleRingMesh);
 
-    // Dual kinetic light-scarf tails flowing behind the acrobat's neck
-    this.scarfLeft.position.set(-2.5, 14.5, 3.2);
-    this.scarfRight.position.set(2.5, 14.5, 3.2);
-    this.spine.add(this.scarfLeft);
-    this.spine.add(this.scarfRight);
+    const plumeGeo = new THREE.ConeGeometry(1.75, 9.5, 16, 1, true);
+    plumeGeo.rotateX(Math.PI / 2);
+    plumeGeo.translate(0, 0, 4.8);
+    this.thrusterPlumeMesh = new THREE.Mesh(plumeGeo, this.thrusterPlumeMat);
+    this.thrusterNozzleGroup.add(this.thrusterPlumeMesh);
 
-    const tailGeo = new THREE.BoxGeometry(1.8, 1.2, 16);
-    const tailL = new THREE.Mesh(tailGeo, neonCoreMat);
-    tailL.position.set(0, 0, 8);
-    this.scarfLeft.add(tailL);
+    // ============================================================================
+    // B. DETACHED MAGNETIC WING-BLADES (Floating ±7 units left/right of central core)
+    // ============================================================================
+    this.gliderRoot.add(this.wingOrbitGroup);
+    this.leftWingPivot.position.set(-WING_BASE_OFFSET_X, 0, 0);
+    this.rightWingPivot.position.set(WING_BASE_OFFSET_X, 0, 0);
+    this.wingOrbitGroup.add(this.leftWingPivot);
+    this.wingOrbitGroup.add(this.rightWingPivot);
 
-    const tailR = new THREE.Mesh(tailGeo, neonCoreMat);
-    tailR.position.set(0, 0, 8);
-    this.scarfRight.add(tailR);
+    const buildWingBlade = (side: -1 | 1): THREE.Group => {
+      const wingGroup = new THREE.Group();
 
-    // 4. Left & Right Articulated Arms (Shoulder -> Upper Arm -> Elbow -> Forearm)
-    this.leftShoulder.position.set(-7.2, 13.5, 0);
-    this.rightShoulder.position.set(7.2, 13.5, 0);
-    this.spine.add(this.leftShoulder);
-    this.spine.add(this.rightShoulder);
+      // Swept-forward aerodynamic blade outer titanium shell
+      const bladeShape = new THREE.Shape();
+      bladeShape.moveTo(0, 5.2); // Inner forward root
+      bladeShape.lineTo(side * 4.8, 11.2); // Swept-forward leading edge mid
+      bladeShape.lineTo(side * 10.2, 14.5); // Forward-swept razor wingtip!
+      bladeShape.lineTo(side * 11.4, 6.0); // Outer wingtip edge
+      bladeShape.lineTo(side * 7.8, -8.5); // Outer aft corner
+      bladeShape.lineTo(side * 2.2, -5.2); // Recessed trailing notch
+      bladeShape.lineTo(0, -6.8); // Inner aft root
+      bladeShape.closePath();
 
-    this.leftShoulder.add(makeLimb(3.2, 8.5, 3.2, -4.2));
-    this.rightShoulder.add(makeLimb(3.2, 8.5, 3.2, -4.2));
+      const bladeGeo = new THREE.ExtrudeGeometry(bladeShape, {
+        depth: 1.35,
+        bevelEnabled: true,
+        bevelThickness: 1.2,
+        bevelSize: 1.0,
+        bevelSegments: 2,
+      });
+      bladeGeo.rotateX(-Math.PI / 2);
+      bladeGeo.translate(0, -0.65, 0);
+      const bladeShell = new THREE.Mesh(bladeGeo, this.darkArmorMat);
+      wingGroup.add(bladeShell);
 
-    this.leftElbow.position.set(0, -8.5, 0);
-    this.rightElbow.position.set(0, -8.5, 0);
-    this.leftShoulder.add(this.leftElbow);
-    this.rightShoulder.add(this.rightElbow);
+      // Recessed glowing plasma trailing edge & wingtip energy blade
+      const plasmaShape = new THREE.Shape();
+      plasmaShape.moveTo(side * 0.6, -5.8);
+      plasmaShape.lineTo(side * 2.6, -4.4);
+      plasmaShape.lineTo(side * 7.4, -7.8);
+      plasmaShape.lineTo(side * 10.6, 5.2);
+      plasmaShape.lineTo(side * 9.5, -10.8);
+      plasmaShape.lineTo(side * 2.4, -8.2);
+      plasmaShape.closePath();
 
-    this.leftElbow.add(makeLimb(2.8, 8.5, 2.8, -4.2, true));
-    this.rightElbow.add(makeLimb(2.8, 8.5, 2.8, -4.2, true));
+      const plasmaGeo = new THREE.ExtrudeGeometry(plasmaShape, {
+        depth: 0.55,
+        bevelEnabled: true,
+        bevelThickness: 0.45,
+        bevelSize: 0.4,
+        bevelSegments: 2,
+      });
+      plasmaGeo.rotateX(-Math.PI / 2);
+      plasmaGeo.translate(0, -0.28, 0);
+      const plasmaEdge = new THREE.Mesh(plasmaGeo, this.neonCoreMat);
+      wingGroup.add(plasmaEdge);
 
-    // 5. Left & Right Articulated Legs (Hip -> Thigh -> Knee -> Shin + Cyber-Skates)
-    this.leftHip.position.set(-3.4, -1.5, 0);
-    this.rightHip.position.set(3.4, -1.5, 0);
-    this.pelvis.add(this.leftHip);
-    this.pelvis.add(this.rightHip);
+      // Subtle canted aerodynamic dihedral
+      wingGroup.rotation.z = side * -0.08;
+      return wingGroup;
+    };
 
-    this.leftHip.add(makeLimb(4.0, 11.5, 4.2, -5.75));
-    this.rightHip.add(makeLimb(4.0, 11.5, 4.2, -5.75));
+    this.leftWingPivot.add(buildWingBlade(-1));
+    this.rightWingPivot.add(buildWingBlade(1));
 
-    this.leftKnee.position.set(0, -11.5, 0);
-    this.rightKnee.position.set(0, -11.5, 0);
-    this.leftHip.add(this.leftKnee);
-    this.rightHip.add(this.rightKnee);
+    // ============================================================================
+    // C. ARTICULATED 6-SEGMENT KINETIC SPINE / TAIL (Tapering Beveled Chevrons)
+    // ============================================================================
+    this.tailRoot.position.set(0, -0.2, 14.5);
+    this.gliderRoot.add(this.tailRoot);
 
-    this.leftKnee.add(makeLimb(3.2, 12.0, 3.4, -6.0));
-    this.rightKnee.add(makeLimb(3.2, 12.0, 3.4, -6.0));
+    const chevronShape = new THREE.Shape();
+    chevronShape.moveTo(0, 1.8); // Forward apex pointing into exhaust
+    chevronShape.lineTo(3.2, -0.8); // Right chevron wing
+    chevronShape.lineTo(2.2, -2.4); // Right aft tip
+    chevronShape.lineTo(0, -1.0); // Rear notch
+    chevronShape.lineTo(-2.2, -2.4); // Left aft tip
+    chevronShape.lineTo(-3.2, -0.8); // Left chevron wing
+    chevronShape.closePath();
 
-    // Glowing Cyber-Blade Feet (Parkour / Skate Runners)
-    const bladeL = makeLimb(3.4, 2.2, 8.5, -12.2, true);
-    bladeL.position.z = -1.8;
-    this.leftKnee.add(bladeL);
+    const chevronArmorGeo = new THREE.ExtrudeGeometry(chevronShape, {
+      depth: 0.85,
+      bevelEnabled: true,
+      bevelThickness: 0.55,
+      bevelSize: 0.45,
+      bevelSegments: 2,
+    });
+    chevronArmorGeo.rotateX(-Math.PI / 2);
+    chevronArmorGeo.translate(0, -0.42, 0);
 
-    const bladeR = makeLimb(3.4, 2.2, 8.5, -12.2, true);
-    bladeR.position.z = -1.8;
-    this.rightKnee.add(bladeR);
+    const chevronCoreShape = new THREE.Shape();
+    chevronCoreShape.moveTo(0, 1.2);
+    chevronCoreShape.lineTo(1.3, -1.2);
+    chevronCoreShape.lineTo(0, -0.5);
+    chevronCoreShape.lineTo(-1.3, -1.2);
+    chevronCoreShape.closePath();
+
+    const chevronCoreGeo = new THREE.ExtrudeGeometry(chevronCoreShape, {
+      depth: 0.5,
+      bevelEnabled: true,
+      bevelThickness: 0.35,
+      bevelSize: 0.3,
+      bevelSegments: 2,
+    });
+    chevronCoreGeo.rotateX(-Math.PI / 2);
+    chevronCoreGeo.translate(0, 0.35, 0);
+
+    for (let i = 0; i < TAIL_SEGMENT_COUNT; i++) {
+      const segGroup = new THREE.Group();
+      const taper = 1.0 - i * 0.125; // Tapers smoothly from 1.0 down to 0.375
+      segGroup.scale.setScalar(taper);
+
+      const armorPlate = new THREE.Mesh(chevronArmorGeo, this.darkArmorMat);
+      const neonNode = new THREE.Mesh(chevronCoreGeo, this.neonCoreMat);
+      segGroup.add(armorPlate);
+      segGroup.add(neonNode);
+
+      this.tailRoot.add(segGroup);
+      this.tailSegments.push(segGroup);
+    }
   }
 
   public resetTrail(x: number, y: number, z: number, yaw: number): void {
     this.smoothHeadingYaw = yaw;
+    this.prevViewYaw = yaw;
+    this.initializedYaw = true;
+
+    this.rollSpring.reset(0);
+    this.pitchSpring.reset(0);
+    this.yawCarveSpring.reset(0);
+    this.bodyHeaveSpring.reset(0);
+    this.wingSpreadSpring.reset(0);
+    this.wingVerticalSpring.reset(0);
+    this.orbitalAngleSpring.reset(0);
+    this.dashSnapSpring.reset(0);
+    this.orbitalAngle = 0;
+    this.spineHistory = [];
+
     this.history = [];
     for (let i = 0; i < TRAIL_SEGMENTS; i++) {
-      this.history.push({ x, y: y + 24, z, yaw });
+      this.history.push({ x, y: y + 23, z: z + 10, yaw, roll: 0 });
     }
     this.updateTrailBuffer();
+  }
+
+  public update(
+    pos: THREE.Vector3,
+    vel: THREE.Vector3,
+    viewYaw: number,
+    dt: number,
+    animInput?: Partial<AcrobatAnimInput>
+  ): void {
+    this.updateTransform(pos, vel, viewYaw, dt, animInput);
   }
 
   public updateTransform(
@@ -267,205 +656,321 @@ export class PlayerRig {
     dt: number,
     animInput?: Partial<AcrobatAnimInput>
   ): void {
+    const safeDt = Math.min(Math.max(dt, 0.001), 0.1);
+    this.simTime += safeDt;
     this.group.position.copy(pos);
 
-    const speed = Math.hypot(vel.x, vel.z);
+    const speed = animInput?.ups ?? Math.hypot(vel.x, vel.z);
+    this.lastKnownUps = speed;
     const grounded = animInput?.grounded ?? pos.y <= 0.5;
-    const smove = animInput?.smove ?? 0;
+    const isSurfing = Boolean(animInput?.isSurfing);
 
-    // Detect landing transition for squash-and-spring knee absorption
+    if (!this.initializedYaw) {
+      this.prevViewYaw = viewYaw;
+      this.smoothHeadingYaw = viewYaw;
+      this.initializedYaw = true;
+    }
+
+    // 1. Bhop Squash & Rebound: When a jump/bhop tick is detected
+    // Pre-allocate a pool of 4 flat ring meshes per rig. Whenever the player lands a bhop above 450 UPS,
+    // spawn an expanding neon shockwave ring flat on the deck at their coordinates (scale: 1 -> 9, opacity: 0.9 -> 0.0 over 220ms).
     if (grounded && !this.wasGrounded) {
-      this.landingSquash = Math.min(1.0, 0.45 + speed / 1200);
+      this.wingSpreadSpring.impulse(140);
+      this.wingVerticalSpring.impulse(-160);
+
+      if (speed > 450) {
+        this.spawnBhopShockwave(pos.x, pos.z, pos.y);
+      }
     }
     this.wasGrounded = grounded;
 
-    // Smoothly orient character toward viewYaw with athletic velocity-carve lead
+    // 2. Air-Strafe & Surf Carving Roll:
+    // Compute yawRate = shortestAngleDiff(currentYaw, prevYaw) / dt.
+    // Target roll angle = clamp(-yawRate * 0.38, -0.95, 0.95) radians (±55°).
+    // If surfing (isSurfing), blend roll to match the surf ramp angle.
+    const yawRate = shortestAngleDiff(viewYaw, this.prevViewYaw) / safeDt;
+    this.prevViewYaw = viewYaw;
+
+    let targetRoll = THREE.MathUtils.clamp(-yawRate * 0.38, -0.95, 0.95);
+
+    if (isSurfing) {
+      const surfAngle =
+        animInput?.surfRampAngle !== undefined
+          ? animInput.surfRampAngle
+          : animInput?.smove !== undefined && animInput.smove < 0
+          ? -0.785
+          : 0.785;
+      targetRoll = THREE.MathUtils.lerp(targetRoll, surfAngle, 0.85);
+    }
+
+    const currentRoll = this.rollSpring.update(
+      targetRoll,
+      SPRING_STIFFNESS,
+      SPRING_DAMPING,
+      safeDt
+    );
+
+    // Smooth heading orientation for fuselage facing
     let targetHeading = viewYaw;
     if (speed > 25) {
       const velHeading = Math.atan2(-vel.x, -vel.z);
-      let velDiff = velHeading - viewYaw;
-      while (velDiff > Math.PI) velDiff -= Math.PI * 2;
-      while (velDiff < -Math.PI) velDiff += Math.PI * 2;
-      // Only blend toward velocity heading when moving generally forward/sideways, clamped so body stays aligned with aim
+      const velDiff = shortestAngleDiff(velHeading, viewYaw);
       if (Math.abs(velDiff) < Math.PI * 0.65) {
-        targetHeading = viewYaw + THREE.MathUtils.clamp(velDiff * 0.55, -0.48, 0.48);
+        targetHeading =
+          viewYaw + THREE.MathUtils.clamp(velDiff * 0.42, -0.42, 0.42);
       }
     }
-    let yawDiff = targetHeading - this.smoothHeadingYaw;
-    while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
-    while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
-    this.smoothHeadingYaw += yawDiff * (1 - Math.exp(-dt * 18));
+    const headingDelta = shortestAngleDiff(targetHeading, this.smoothHeadingYaw);
+    this.smoothHeadingYaw = wrapAngle(
+      this.smoothHeadingYaw + headingDelta * (1 - Math.exp(-safeDt * 20))
+    );
     this.group.rotation.y = this.smoothHeadingYaw;
 
-    // Compute strafe turn delta for athletic body banking
-    let lookDiff = viewYaw - this.smoothHeadingYaw;
-    while (lookDiff > Math.PI) lookDiff -= Math.PI * 2;
-    while (lookDiff < -Math.PI) lookDiff += Math.PI * 2;
-
-    const strafeInputSign = smove < 0 ? 1 : smove > 0 ? -1 : 0;
-    const targetBankZ = THREE.MathUtils.clamp(
-      lookDiff * 0.85 + strafeInputSign * 0.24,
-      -0.52,
-      0.52
-    );
-    const speedRatio = Math.min(1.6, speed / 320);
-    const targetLeanX = grounded
-      ? -0.18 * speedRatio - this.landingSquash * 0.22
-      : THREE.MathUtils.clamp(vel.y * 0.0012 - 0.16, -0.45, 0.35);
-    const targetTwistY = THREE.MathUtils.clamp(
-      lookDiff * 0.55 + strafeInputSign * 0.28,
-      -0.6,
-      0.6
+    // 3. Pitch & Spine Wave:
+    // Pitch coreGroup.rotation.x smoothly with vertical velocity (clamp(velY * 0.0012, -0.45, 0.45)).
+    if (this.dashTimer > 0) {
+      this.dashTimer = Math.max(0, this.dashTimer - safeDt);
+    }
+    const isDashing = Boolean(animInput?.isDashing) || this.dashTimer > 0;
+    const dashBlend = THREE.MathUtils.clamp(
+      this.dashSnapSpring.update(
+        isDashing ? 1.0 : 0.0,
+        SPRING_STIFFNESS,
+        SPRING_DAMPING,
+        safeDt
+      ),
+      0.0,
+      1.2
     );
 
-    const blend = Math.min(1, dt * 16);
-    this.smoothLeanX += (targetLeanX - this.smoothLeanX) * blend;
-    this.smoothLeanZ += (targetBankZ - this.smoothLeanZ) * blend;
-    this.smoothTwistY += (targetTwistY - this.smoothTwistY) * blend;
-    this.landingSquash = Math.max(0, this.landingSquash - dt * 4.2);
-    this.dashPulse = Math.max(0, this.dashPulse - dt * 3.0);
+    const speedNorm = Math.min(1.5, speed / 420);
+    const targetPitch = THREE.MathUtils.clamp(vel.y * 0.0012, -0.45, 0.45);
+    const currentPitch = this.pitchSpring.update(
+      targetPitch - dashBlend * 0.1,
+      SPRING_STIFFNESS,
+      SPRING_DAMPING,
+      safeDt
+    );
 
-    if (this.flipAngle > 0) {
-      this.flipAngle = Math.max(0, this.flipAngle - dt * 13.5);
+    const hoverBob = Math.sin(this.simTime * 5.5) * 0.55;
+    const heaveOffset = this.bodyHeaveSpring.update(
+      hoverBob,
+      SPRING_STIFFNESS,
+      SPRING_DAMPING,
+      safeDt
+    );
+
+    // Apply Central Fuselage & Core Group Pose
+    this.gliderRoot.position.y = 24.0 + heaveOffset;
+    this.coreGroup.rotation.x = currentPitch;
+    this.coreGroup.rotation.z = currentRoll;
+    this.coreGroup.rotation.y = THREE.MathUtils.clamp(
+      -yawRate * 0.015,
+      -0.22,
+      0.22
+    );
+
+    // 4. Asymmetric Magnetic Wing Flare, Bhop Squash & Rebound, Double-Jump Vortex & Conc Dash Delta-Snap
+    const wingSpread = this.wingSpreadSpring.update(
+      0,
+      SPRING_STIFFNESS,
+      SPRING_DAMPING,
+      safeDt
+    );
+    const wingVert = this.wingVerticalSpring.update(
+      0,
+      SPRING_STIFFNESS,
+      SPRING_DAMPING,
+      safeDt
+    );
+    const currentOrbitalAngle = this.orbitalAngleSpring.update(
+      this.orbitalAngle,
+      SPRING_STIFFNESS,
+      SPRING_DAMPING,
+      safeDt
+    );
+
+    this.wingOrbitGroup.rotation.z = currentRoll + currentOrbitalAngle;
+    this.wingOrbitGroup.rotation.x = currentPitch;
+
+    // Conc Dash: pull the wings inward (±4.2u) into a tight delta-dart formation
+    const baseWingX = THREE.MathUtils.lerp(WING_BASE_OFFSET_X, 4.2, dashBlend);
+    const dashSweepZ = dashBlend * 3.8;
+
+    // Asymmetric Magnetic Wing Flare:
+    // When banking left (roll > 0), dip leftWing.position.y down/inward and flare rightWing.position.y upward/outward,
+    // plus angle wing pitch like active air-ailerons.
+    const rollNorm = THREE.MathUtils.clamp(currentRoll / 0.95, -1.0, 1.0);
+    const rollInwardOutward = rollNorm * 1.6;
+
+    const leftWingX = -(baseWingX + wingSpread * 0.035 - rollInwardOutward);
+    const leftWingY = -rollNorm * 4.2 + wingVert * 0.035;
+
+    const rightWingX = +(baseWingX + wingSpread * 0.035 + rollInwardOutward);
+    const rightWingY = +rollNorm * 4.2 + wingVert * 0.035;
+
+    this.leftWing.position.set(leftWingX, leftWingY, dashSweepZ);
+    this.rightWing.position.set(rightWingX, rightWingY, dashSweepZ);
+
+    // Active air-aileron wing pitch angle
+    this.leftWing.rotation.x = -currentRoll * 0.35;
+    this.rightWing.rotation.x = currentRoll * 0.35;
+    this.leftWing.rotation.z = -currentRoll * 0.25;
+    this.rightWing.rotation.z = -currentRoll * 0.25;
+    this.leftWing.rotation.y = dashBlend * 0.28;
+    this.rightWing.rotation.y = -dashBlend * 0.28;
+
+    // Gyroscope Reactor Spin
+    const spinSpeed = 3.2 + speed * 0.018 + dashBlend * 12.0;
+    this.gyroRingOuter.rotation.x += safeDt * spinSpeed;
+    this.gyroRingOuter.rotation.y += safeDt * spinSpeed * 0.65;
+    this.gyroRingInner.rotation.y -= safeDt * spinSpeed * 1.35;
+    this.gyroRingInner.rotation.z += safeDt * spinSpeed * 0.85;
+    this.reactorCoreMesh.rotation.y += safeDt * spinSpeed * 0.9;
+    this.reactorCoreMesh.rotation.x -= safeDt * spinSpeed * 0.5;
+
+    // Rear thruster flare for 300ms on Conc Dash
+    const thrusterFlare = this.dashTimer > 0 ? this.dashTimer / 0.30 : 0;
+    const flareFactor = Math.max(dashBlend, thrusterFlare);
+    const plumeScaleZ = 0.75 + speedNorm * 0.85 + flareFactor * 2.6;
+    const plumeScaleXY = 0.85 + speedNorm * 0.25 + flareFactor * 0.8;
+    this.thrusterPlumeMesh.scale.set(plumeScaleXY, plumeScaleXY, plumeScaleZ);
+    this.thrusterNozzleGroup.scale.setScalar(1.0 + flareFactor * 0.4);
+    this.thrusterPlumeMat.opacity = THREE.MathUtils.clamp(
+      0.55 + speedNorm * 0.25 + flareFactor * 0.45,
+      0.45,
+      1.0
+    );
+
+    // 5. Spine Wave: Propagate pitch and yaw history down the 6 tailSegments with a 25ms phase offset per segment
+    // so the tail carves fluid S-waves in the air.
+    this.spineHistory.unshift({
+      time: this.simTime,
+      pitch: currentPitch,
+      yaw: this.smoothHeadingYaw,
+      yawRate,
+      roll: currentRoll,
+      heave: heaveOffset,
+    });
+    while (
+      this.spineHistory.length > 50 &&
+      this.simTime - this.spineHistory[this.spineHistory.length - 1].time > 0.4
+    ) {
+      this.spineHistory.pop();
     }
 
-    // Apply root & spine posture
-    const squashDrop = this.landingSquash * 5.5;
-    this.pelvis.position.y = 25.5 - squashDrop;
-    this.pelvis.rotation.z = this.smoothLeanZ;
-    this.pelvis.rotation.x =
-      this.smoothLeanX - (this.flipAngle > 0 ? this.flipAngle : 0);
+    this.tailRoot.rotation.z = currentRoll * 0.85;
+    for (let i = 0; i < TAIL_SEGMENT_COUNT; i++) {
+      const targetSampleTime = this.simTime - (i + 1) * TAIL_PHASE_DELAY_SEC;
+      const delayedPose = this.sampleDelayedSpinePose(targetSampleTime);
+      const seg = this.tailSegments[i];
 
-    this.spine.rotation.y = this.smoothTwistY;
-    this.spine.rotation.x = -0.12 * speedRatio - this.dashPulse * 0.45;
-    this.headGroup.rotation.y = this.smoothTwistY * 0.65;
-    this.headGroup.rotation.x = -this.smoothLeanX * 0.5;
+      const whipAmp = 1.0 + i * 0.22;
+      const flutter =
+        Math.sin(this.simTime * (12 + speed * 0.02) - i * 0.85) *
+        0.18 *
+        Math.min(1.4, speed / 350);
 
-    // Animate kinetic energy scarf flowing in the wind behind the runner
-    const time = performance.now() * 0.01;
-    const scarfPitch = 0.25 + Math.min(0.95, speed / 520);
-    this.scarfLeft.rotation.x = scarfPitch + Math.sin(time + 0.5) * 0.14;
-    this.scarfRight.rotation.x = scarfPitch + Math.cos(time) * 0.14;
-    this.scarfLeft.rotation.y = -this.smoothTwistY * 0.5;
-    this.scarfRight.rotation.y = -this.smoothTwistY * 0.5;
+      const segZ = i * 3.15;
+      const segY =
+        -delayedPose.pitch * (i + 1) * 1.65 +
+        (delayedPose.heave - heaveOffset) * 0.45 +
+        flutter;
+      const yawOffset = shortestAngleDiff(delayedPose.yaw, this.smoothHeadingYaw);
+      const segX =
+        yawOffset * (i + 1) * 12.0 +
+        THREE.MathUtils.clamp(delayedPose.yawRate * 0.14, -1.8, 1.8) *
+          (i + 1) *
+          0.85;
 
-    if (grounded) {
-      // Fluid Sprint / Parkour Run Cycle driven by actual speed
-      if (speed > 15) {
-        this.runCycle += dt * (6.5 + speed * 0.026);
-        const s = Math.sin(this.runCycle);
-        const c = Math.cos(this.runCycle);
-        const amp = Math.min(1.25, speed / 290);
-
-        // Pelvis vertical bounce & counter-sway
-        this.pelvis.position.y += Math.abs(s) * 2.2 * amp;
-
-        // Legs pump with high knee-drive & reactive shin flexion
-        this.leftHip.rotation.x = s * 0.92 * amp - this.landingSquash * 0.5;
-        this.leftKnee.rotation.x =
-          -Math.max(0.15, -c * 0.95 * amp + 0.35) - this.landingSquash * 0.85;
-
-        this.rightHip.rotation.x = -s * 0.92 * amp - this.landingSquash * 0.5;
-        this.rightKnee.rotation.x =
-          -Math.max(0.15, c * 0.95 * amp + 0.35) - this.landingSquash * 0.85;
-
-        // Opposite Arms pump athletically
-        this.leftShoulder.rotation.x = -s * 0.82 * amp;
-        this.leftShoulder.rotation.z = 0.18;
-        this.leftElbow.rotation.x = 0.65 + Math.max(0, -s) * 0.55;
-
-        this.rightShoulder.rotation.x = s * 0.82 * amp;
-        this.rightShoulder.rotation.z = -0.18;
-        this.rightElbow.rotation.x = 0.65 + Math.max(0, s) * 0.55;
-      } else {
-        // Athletic Parkour Idle Ready Stance
-        const breathe = Math.sin(time * 0.35) * 0.06;
-        this.leftHip.rotation.x = 0.22 + breathe;
-        this.leftKnee.rotation.x = -0.42;
-        this.rightHip.rotation.x = -0.18 + breathe;
-        this.rightKnee.rotation.x = -0.35;
-
-        this.leftShoulder.rotation.x = -0.15 + breathe;
-        this.leftShoulder.rotation.z = 0.22;
-        this.leftElbow.rotation.x = 0.55;
-
-        this.rightShoulder.rotation.x = 0.15 - breathe;
-        this.rightShoulder.rotation.z = -0.22;
-        this.rightElbow.rotation.x = 0.55;
-      }
-    } else {
-      // Mid-Air Acrobatic Carving / Vault / Strafe Pose!
-      // Lead knee tucks high while trailing leg extends dynamically like a cyber-skater / parkour air-strafer
-      const airBlend = Math.min(1, dt * 14);
-      const strafeLeft = smove < 0 || (smove === 0 && lookDiff > 0);
-
-      const leadHipTarget = 0.85 + this.dashPulse * 0.35;
-      const leadKneeTarget = -1.25;
-      const trailHipTarget = -0.58 - this.dashPulse * 0.45;
-      const trailKneeTarget = -0.38;
-
-      if (strafeLeft) {
-        this.leftHip.rotation.x += (leadHipTarget - this.leftHip.rotation.x) * airBlend;
-        this.leftKnee.rotation.x += (leadKneeTarget - this.leftKnee.rotation.x) * airBlend;
-        this.rightHip.rotation.x += (trailHipTarget - this.rightHip.rotation.x) * airBlend;
-        this.rightKnee.rotation.x += (trailKneeTarget - this.rightKnee.rotation.x) * airBlend;
-
-        // Outstretched balance arms during air-strafe carve
-        this.leftShoulder.rotation.x += (-0.55 - this.leftShoulder.rotation.x) * airBlend;
-        this.leftShoulder.rotation.z += (0.68 - this.leftShoulder.rotation.z) * airBlend;
-        this.leftElbow.rotation.x += (0.45 - this.leftElbow.rotation.x) * airBlend;
-
-        this.rightShoulder.rotation.x += (0.48 - this.rightShoulder.rotation.x) * airBlend;
-        this.rightShoulder.rotation.z += (-0.58 - this.rightShoulder.rotation.z) * airBlend;
-        this.rightElbow.rotation.x += (0.85 - this.rightElbow.rotation.x) * airBlend;
-      } else {
-        this.rightHip.rotation.x += (leadHipTarget - this.rightHip.rotation.x) * airBlend;
-        this.rightKnee.rotation.x += (leadKneeTarget - this.rightKnee.rotation.x) * airBlend;
-        this.leftHip.rotation.x += (trailHipTarget - this.leftHip.rotation.x) * airBlend;
-        this.leftKnee.rotation.x += (trailKneeTarget - this.leftKnee.rotation.x) * airBlend;
-
-        this.rightShoulder.rotation.x += (-0.55 - this.rightShoulder.rotation.x) * airBlend;
-        this.rightShoulder.rotation.z += (-0.68 - this.rightShoulder.rotation.z) * airBlend;
-        this.rightElbow.rotation.x += (0.45 - this.rightElbow.rotation.x) * airBlend;
-
-        this.leftShoulder.rotation.x += (0.48 - this.leftShoulder.rotation.x) * airBlend;
-        this.leftShoulder.rotation.z += (0.58 - this.leftShoulder.rotation.z) * airBlend;
-        this.leftElbow.rotation.x += (0.85 - this.leftElbow.rotation.x) * airBlend;
-      }
+      seg.position.set(segX, segY, segZ);
+      seg.rotation.x = -delayedPose.pitch * 0.75 * whipAmp + flutter * 0.12;
+      seg.rotation.y = THREE.MathUtils.clamp(
+        yawOffset * 0.75 - delayedPose.yawRate * 0.035 * whipAmp,
+        -0.65,
+        0.65
+      );
+      seg.rotation.z = (delayedPose.roll - currentRoll) * 0.65;
     }
 
-    // Update ribbon trail from upper back
+    // 6. Wing-Tip Plasma Wake Ribbon Trail (44 segments)
     if (this.history.length === 0) {
       this.resetTrail(pos.x, pos.y, pos.z, this.smoothHeadingYaw);
     } else {
+      const aftOffsetX = Math.sin(this.smoothHeadingYaw) * 10;
+      const aftOffsetZ = Math.cos(this.smoothHeadingYaw) * 10;
       this.history.unshift({
-        x: pos.x,
-        y: pos.y + 24,
-        z: pos.z + 6,
+        x: pos.x + aftOffsetX,
+        y: pos.y + 23.5 + heaveOffset * 0.5,
+        z: pos.z + aftOffsetZ,
         yaw: this.smoothHeadingYaw,
+        roll: currentRoll,
       });
       if (this.history.length > TRAIL_SEGMENTS) {
         this.history.pop();
       }
       this.updateTrailBuffer();
     }
+
+    // 7. Step Pool of 4 Flat Bhop Shockwave Rings (scale: 1 -> 9, opacity: 0.9 -> 0.0 over 220ms)
+    for (const slot of this.shockwavePool) {
+      if (!slot.active) continue;
+      slot.elapsed += safeDt;
+      const t = slot.elapsed / SHOCKWAVE_DURATION_SEC;
+      if (t >= 1.0) {
+        slot.active = false;
+        slot.mesh.visible = false;
+        slot.material.opacity = 0;
+      } else {
+        const scale = 1.0 + (9.0 - 1.0) * t;
+        slot.mesh.scale.set(scale, scale, scale);
+        slot.material.opacity = (1.0 - t) * 0.9;
+      }
+    }
+  }
+
+  private sampleDelayedSpinePose(targetTime: number): SpinePoseSample {
+    if (this.spineHistory.length === 0) {
+      return { time: targetTime, pitch: 0, yaw: 0, yawRate: 0, roll: 0, heave: 0 };
+    }
+    for (let i = 0; i < this.spineHistory.length - 1; i++) {
+      const newer = this.spineHistory[i];
+      const older = this.spineHistory[i + 1];
+      if (targetTime >= older.time && targetTime <= newer.time) {
+        const span = Math.max(0.0001, newer.time - older.time);
+        const alpha = (targetTime - older.time) / span;
+        const yawDiff = shortestAngleDiff(newer.yaw, older.yaw);
+        return {
+          time: targetTime,
+          pitch: THREE.MathUtils.lerp(older.pitch, newer.pitch, alpha),
+          yaw: wrapAngle(older.yaw + yawDiff * alpha),
+          yawRate: THREE.MathUtils.lerp(older.yawRate, newer.yawRate, alpha),
+          roll: THREE.MathUtils.lerp(older.roll, newer.roll, alpha),
+          heave: THREE.MathUtils.lerp(older.heave, newer.heave, alpha),
+        };
+      }
+    }
+    return this.spineHistory[this.spineHistory.length - 1];
   }
 
   private updateTrailBuffer(): void {
     for (let i = 0; i < TRAIL_SEGMENTS; i++) {
       const sample = this.history[Math.min(i, this.history.length - 1)];
-      const fade = 1 - i / TRAIL_SEGMENTS;
-      const halfW = TRAIL_HALF_WIDTH * fade;
-      const rx = Math.cos(sample.yaw) * halfW;
-      const rz = -Math.sin(sample.yaw) * halfW;
+      const fade = 1 - i / (TRAIL_SEGMENTS - 1);
+      const halfW = TRAIL_HALF_WIDTH * (0.35 + 0.65 * fade);
+      const cosRoll = Math.cos(sample.roll);
+      const sinRoll = Math.sin(sample.roll);
+      const rx = Math.cos(sample.yaw) * halfW * cosRoll;
+      const ry = sinRoll * halfW;
+      const rz = -Math.sin(sample.yaw) * halfW * cosRoll;
 
       const idx = i * 6;
       this.trailPositions[idx] = sample.x - rx;
-      this.trailPositions[idx + 1] = sample.y;
+      this.trailPositions[idx + 1] = sample.y - ry;
       this.trailPositions[idx + 2] = sample.z - rz;
 
       this.trailPositions[idx + 3] = sample.x + rx;
-      this.trailPositions[idx + 4] = sample.y;
+      this.trailPositions[idx + 4] = sample.y + ry;
       this.trailPositions[idx + 5] = sample.z + rz;
     }
     this.trailGeometry.attributes.position.needsUpdate = true;
